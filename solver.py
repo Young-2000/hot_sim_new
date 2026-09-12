@@ -458,7 +458,8 @@ def export_archive(job,mesh,frames,times,labels,displacement=None):
     hf.close();xml.append('</Grid></Domain></Xdmf>');(dest/'temperature.xdmf').write_text('\n'.join(xml),encoding='utf-8')
     with zipfile.ZipFile(job/'result.zip','w',compression=zipfile.ZIP_DEFLATED) as z:
         for name in ('thermal-fields.h5','temperature.xdmf'):z.write(dest/name,name)
-        for name in ('config.json','audit.json','history.csv'):z.write(job/name,name)
+        for name in ('config.json','audit.json','history.csv','report.md','report.pdf'):
+            if (job/name).exists(): z.write(job/name,name)
 
 def solve_job(job):
     cfg=read_json(job/'config.json');folder=MODELS/cfg['model_id'];display=dict(np.load(folder/'display.npz'))
@@ -581,4 +582,69 @@ def write_report(job,cfg,folder,audit,energy):
     gap=audit.get('air_gap',{})
     lines+=['','## 空气间隙传热',f'- 状态：{"启用" if gap.get("enabled") else "关闭"}',f'- 空气导热系数：{float(gap.get("k_air_W_mK",cfg.get("air_gap_k_W_mK",.026))):.6g} W/(m·K)',f'- 最大建模间隙：{float(gap.get("max_gap_m",cfg.get("air_gap_max_m",.05))):.6g} m',f'- 表面耦合对数：{int(gap.get("pairs",0))}',f'- 有效耦合面积：{float(gap.get("area_m2",0)):.6g} m²',f'- 总空气导热系数：{float(gap.get("conductance_W_K",0)):.6g} W/K']
     if audit.get('warnings'):lines+=['','## 警告']+ [f'- {warning}' for warning in audit['warnings']]
-    (job/'report.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    report_text='\n'.join(lines)+'\n'
+    (job/'report.md').write_text(report_text,encoding='utf-8')
+    write_report_pdf(job/'report.pdf', report_text)
+
+
+def write_report_pdf(path, text):
+    """Render the Markdown report as a compact, portable PDF.
+
+    ReportLab is preferred (and declared in requirements). A tiny built-in
+    writer keeps completed jobs exportable when dependencies have not yet been
+    installed; unsupported glyphs are replaced only in that fallback path.
+    """
+    try:
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        font_name='Helvetica'
+        for candidate in (r'C:\\Windows\\Fonts\\msyh.ttc', r'C:\\Windows\\Fonts\\simsun.ttc'):
+            if os.path.exists(candidate):
+                try:
+                    pdfmetrics.registerFont(TTFont('ThermalCJK', candidate, subfontIndex=0))
+                    font_name='ThermalCJK'
+                    break
+                except Exception:
+                    pass
+        page_w,page_h=A4
+        pdf=canvas.Canvas(str(path), pagesize=A4)
+        pdf.setTitle('Thermal Studio 仿真报告')
+        pdf.setFont(font_name, 9)
+        y=page_h-42
+        for raw in text.splitlines():
+            line=raw.replace('**','').replace('`','')
+            # Keep line lengths readable on A4 without pulling in a parser.
+            chunks=[line[i:i-92] for i in range(0,max(1,len(line)),92)] or ['']
+            for chunk in chunks:
+                if y<38:
+                    pdf.showPage();pdf.setFont(font_name,9);y=page_h-42
+                pdf.drawString(38,y,chunk);y-=13
+        pdf.save()
+        return
+    except Exception:
+        pass
+    _write_basic_pdf(path, text)
+
+
+def _write_basic_pdf(path, text):
+    """Minimal ASCII PDF fallback used only when ReportLab is unavailable."""
+    lines=[]
+    for raw in text.splitlines():
+        line=''.join(ch if 32<=ord(ch)<127 else '?' for ch in raw)
+        lines.extend(line[i:i+100] for i in range(0,max(1,len(line)),100))
+    stream=['BT','/F1 9 Tf','38 805 Td']
+    for line in lines:
+        escaped=line.replace('\\','\\\\').replace('(','\\(').replace(')','\\)')
+        stream.append(f'({escaped}) Tj 0 -13 Td')
+    stream.append('ET')
+    content='\n'.join(stream).encode('ascii')
+    objects=[b'<< /Type /Catalog /Pages 2 0 R >>',b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',b'<< /Length '+str(len(content)).encode('ascii')+b' >>\nstream\n'+content+b'\nendstream']
+    pdf=bytearray(b'%PDF-1.4\n');offsets=[0]
+    for index,obj in enumerate(objects,1):
+        offsets.append(len(pdf));pdf.extend(f'{index} 0 obj\n'.encode('ascii'));pdf.extend(obj);pdf.extend(b'\nendobj\n')
+    xref=len(pdf);pdf.extend(f'xref\n0 {len(objects)+1}\n0000000000 65535 f \n'.encode('ascii'))
+    for offset in offsets[1:]:pdf.extend(f'{offset:010d} 00000 n \n'.encode('ascii'))
+    pdf.extend(f'trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode('ascii'))
+    path.write_bytes(pdf)

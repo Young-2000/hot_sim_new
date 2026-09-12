@@ -9,6 +9,7 @@ trimesh==5.1.0
 rtree==1.4.1
 h5py>=3.12,<4
 meshio==5.3.5
+reportlab>=4.2,<5
 # CUDA 12 runtime bindings for the GPU sparse solver. Use THERMAL_DEVICE=auto for CPU fallback.
 cupy-cuda12x>=14,<15
 cutensor-cu12>=2.8,<3
