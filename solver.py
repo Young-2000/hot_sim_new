@@ -56,7 +56,7 @@ def _gpu_solver(A, rhs):
     matrix = cps.csr_matrix(A)
     vector = cp.asarray(rhs)
     # Heat capacity, conduction, convection, and radiation form an SPD system.
-    solution, info = cupy_cg(matrix, vector, tol=1e-8, maxiter=max(1000, A.shape[0] * 2))
+    solution, info = cupy_cg(matrix, vector, rtol=1e-8, atol=0.0, maxiter=max(1000, A.shape[0] * 2))
     if int(info) != 0:
         raise RuntimeError(f'CUDA sparse solve did not converge (info={int(info)})')
     return cp.asnumpy(solution)
