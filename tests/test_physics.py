@@ -5,7 +5,7 @@ from runtime import *
 import numpy as np
 from scipy.sparse import csr_matrix
 from schemas import Simulation
-from solver import integrate,make_slice
+from solver import integrate,make_slice,_boundary_component_ids,_air_gap_coupling
 
 def test_uniform_adiabatic_heating_and_nondivisible_time_grid():
     cfg=Simulation(model_id='test',duration_s=13,dt_s=4,save_s=5,heat_sources=[dict(name='heater',power_W=6,start_s=2,end_s=11,faces=[0])]).model_dump()
@@ -34,3 +34,17 @@ def test_rejects_nonfinite_and_oversized_runs():
     import pytest
     for update in [dict(initial_C=float('nan')),dict(dt_s=.000001),dict(save_s=.001),dict(regions=[dict(min_m=[0,0,0],max_m=[0,1,1],material=dict(name='x',k=1,rho=1,cp=1))])]:
         with pytest.raises(ValueError):Simulation(model_id='test',**update)
+
+
+def test_air_gap_coupling_connects_nearby_components_and_conserves_constant_field():
+    points=np.array([[0.,0,0],[0,1,0],[0,0,1],[1,0,0],
+                     [.2,0,0],[.2,1,0],[.2,0,1],[1.2,0,0]])
+    tets=np.array([[0,1,2,3],[4,5,6,7]])
+    boundary=np.array([[0,1,2],[4,5,6]])
+    components=_boundary_component_ids(tets,np.array([0,1]),boundary)
+    assert components.tolist()==[0,1]
+    coupling,audit=_air_gap_coupling(points,boundary,components,True,.026,.5)
+    assert audit['pairs']==1
+    assert audit['conductance_W_K']>0
+    np.testing.assert_allclose(coupling@np.ones(len(points)),0,atol=1e-14)
+    assert coupling[0,4]<0

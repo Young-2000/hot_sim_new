@@ -6,9 +6,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from schemas import Simulation, PRESETS, CalibrationRequest, RefrigerationCycle, AgentRequest
-from analysis import run_calibration, run_cycle
+from schemas import Simulation, PRESETS, CalibrationRequest, RefrigerationCycle, CpuSimulation, AgentRequest
+from analysis import run_calibration, run_cycle, run_cpu
 from agent import plan_request
+from solver import gpu_status
 
 app=FastAPI(title='Thermal Studio Local',version='0.1.0')
 app.add_middleware(GZipMiddleware,minimum_size=2000)
@@ -58,7 +59,7 @@ def validate_geometry(cfg):
     return folder
 
 @app.get('/api/health')
-def health():return dict(ok=True,app='Thermal Studio Local',version='0.1.0',pid=os.getpid())
+def health():return dict(ok=True,app='Thermal Studio Local',version='0.1.0',pid=os.getpid(),compute=gpu_status())
 
 @app.post('/api/analysis/calibrate')
 def calibrate(request:CalibrationRequest):
@@ -67,6 +68,15 @@ def calibrate(request:CalibrationRequest):
 @app.post('/api/analysis/refrigeration')
 def refrigeration(request:RefrigerationCycle):
     return run_cycle(request)
+
+@app.post('/api/analysis/cpu')
+def cpu_simulation(request:CpuSimulation):
+    """Run the standalone CPU cooling workbench model.
+
+    This endpoint is intentionally independent of uploaded geometry and the
+    finite-element job queue, so changing a cooler type remains interactive.
+    """
+    return run_cpu(request)
 
 @app.post('/api/agent/plan')
 def agent_plan(request:AgentRequest):
@@ -128,6 +138,8 @@ def project(id:str):
 @app.post('/api/jobs',status_code=202)
 def run(cfg:Simulation):
     folder=validate_geometry(cfg)
+    if not cfg.heat_sources:
+        raise HTTPException(422,'请先添加至少一个热源并选择受热面或点位置，再运行仿真')
     if not read_json(folder/'metadata.json').get('mesh_ready'):raise HTTPException(422,'STL 尚未封闭，请修复后导入，或改用 STEP')
     with process_lock:
         for id,process in processes.items():
@@ -169,7 +181,7 @@ def slice_file(id:str,key:str,name:str):
 @app.get('/api/jobs/{id}/files/{name}')
 def download(id:str,name:str):
     folder=located(JOBS,id)
-    if name not in ('surface.bin','config.json','history.csv','audit.json','result.zip'):raise HTTPException(404)
+    if name not in ('surface.bin','config.json','history.csv','audit.json','report.md','result.zip'):raise HTTPException(404)
     if not (folder/name).exists():raise HTTPException(404,'文件尚未生成')
     return FileResponse(folder/name,filename=None if name=='surface.bin' else name)
 

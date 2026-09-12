@@ -40,6 +40,33 @@ def _display_surface(model_id):
 
 def _face_selection(model_id, text, triangles):
     lower = text.lower()
+    # A heat source phrased as "在组件 9 施加" should target that
+    # component's exterior faces, even when the user does not also say
+    # "整个外表面".  Material assignments may mention several component
+    # numbers, so only use a component preceded by an explicit target word.
+    target = re.search(r'(?:在|给|对)\s*(?:组件|部件)\s*(\d+)', text)
+    if not target:
+        target = re.search(r'(?:组件|部件)\s*(\d+)\s*(?:的)?\s*(?:外表面|表面)', text)
+    if target:
+        component_id = int(target.group(1)) - 1
+        metadata = read_json(MODELS / model_id / 'metadata.json')
+        components = metadata.get('components') or []
+        record = next((item for item in components if int(item.get('component_id', -1)) == component_id), None)
+        if record:
+            display = read_json(MODELS / model_id / 'display.json')
+            points = np.asarray(display['points'], dtype=float).reshape(-1, 3)
+            faces = np.asarray(display['faces'], dtype=np.int64).reshape(-1, 3)
+            centers = points[faces].mean(axis=1)
+            low = np.asarray(record['bounds_m'][0], dtype=float)
+            high = np.asarray(record['bounds_m'][1], dtype=float)
+            tolerance = max(float(np.ptp(points, axis=0).max()) * 1e-8, 1e-9)
+            selected = np.all((centers >= low - tolerance) & (centers <= high + tolerance), axis=1)
+            outer = np.asarray(display.get('is_outer', np.ones(len(centers))), dtype=bool)
+            if len(outer) == len(selected):
+                selected &= outer
+            indices = np.flatnonzero(selected).tolist()
+            if indices:
+                return indices, f'已自动选择组件 {component_id + 1} 外表面 ({len(indices)} 个三角面)'
     if re.search(r'整个外表面|全部外表面|所有表面|全表面', text, re.I):
         return list(range(triangles)), '已自动选择全部外表面'
 
@@ -129,6 +156,20 @@ def make_plan(model_id, prompt, current):
     if material:
         cfg['base_material'] = copy.deepcopy(material)
         changes.append(f'基础材料: {material["name"]}')
+
+    component_aliases=(
+        ('不锈钢|stainless','不锈钢（示例）'),('碳钢|steel','碳钢（示例）'),
+        ('铝|alum|aluminium','铝（示例）'),('铜|copper','铜 C11000'),('铁|iron','铁（示例）'))
+    assignments=[]
+    for match in re.finditer(r'(?:组件|部件)\s*(\d+)[^，,。;；\n]{0,24}?(不锈钢|stainless|碳钢|steel|铝|alum|aluminium|铜|copper|铁|iron)',prompt,re.I):
+        component_id=int(match.group(1))-1
+        if component_id<0: continue
+        material_name=next((name for pattern,name in component_aliases if re.fullmatch(pattern,match.group(2),re.I)),None)
+        if material_name:
+            preset=next(item for item in PRESETS if item['name']==material_name)
+            assignments.append(dict(component_id=component_id,material=copy.deepcopy(preset)))
+            changes.append(f'组件 {component_id+1} 材料: {material_name}')
+    if assignments: cfg['component_materials']=assignments
 
     if re.search(r'稳态|steady|最终稳定', prompt, re.I):
         cfg['analysis_mode'] = 'steady'

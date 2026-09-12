@@ -41,6 +41,10 @@ class Region(Strict):
         if any(a>=b for a,b in zip(self.min_m,self.max_m)): raise ValueError('区域每个轴的最小值必须小于最大值')
         return self
 
+class ComponentMaterial(Strict):
+    component_id: int = Field(ge=0, le=10000)
+    material: Material
+
 class Heat(Strict):
     name: str = Field(default='热源',max_length=60)
     source_type: Literal['point','surface'] = 'surface'
@@ -92,6 +96,7 @@ class Simulation(Strict):
     name: str = Field(default='未命名算例',min_length=1,max_length=80)
     base_material: Material = Field(default_factory=lambda:Material(**PRESETS[0]))
     regions: list[Region] = Field(default_factory=list,max_length=16)
+    component_materials: list[ComponentMaterial] = Field(default_factory=list,max_length=64)
     heat_sources: list[Heat] = Field(default_factory=list,max_length=16)
     cooling: list[Cooling] = Field(default_factory=list,max_length=16)
     analysis_mode: Literal['transient','steady'] = 'transient'
@@ -102,6 +107,11 @@ class Simulation(Strict):
     heat_convection: bool = False
     radiation_enabled: bool = False
     emissivity: Finite = Field(default=.8,ge=0,le=1)
+    # Heat transfer through the air between disconnected solid components.
+    # This is a reduced-order conduction model, not a CFD airflow solve.
+    air_gap_enabled: bool = True
+    air_gap_k_W_mK: Finite = Field(default=.026,gt=0,le=10)
+    air_gap_max_m: Finite = Field(default=.05,gt=1e-7,le=10)
     contact_resistance_m2K_W: Finite = Field(default=0,ge=0,le=1e6)
     duration_s: Finite = Field(default=3600,gt=0,le=864000)
     dt_s: Finite = Field(default=15,gt=0,le=3600)
@@ -149,6 +159,42 @@ class RefrigerationCycle(Strict):
     @model_validator(mode='after')
     def valid_temperatures(self):
         if self.condensing_C <= self.evaporating_C + 1: raise ValueError('冷凝温度必须高于蒸发温度')
+        return self
+
+class CpuSimulation(Strict):
+    """Standalone reduced-order CPU cooling scenario.
+
+    This intentionally complements the mesh solver: it represents a motherboard,
+    CPU package, cooler and (for water cooling) coolant/radiator as thermal nodes.
+    """
+    cooler_type: Literal['air', 'water'] = 'air'
+    duration_s: Finite = Field(default=600, gt=0, le=864000)
+    dt_s: Finite = Field(default=0.5, gt=0, le=60)
+    initial_C: Finite = Field(default=25, ge=-273.15, le=5000)
+    ambient_C: Finite = Field(default=25, ge=-273.15, le=5000)
+    cpu_power_W: Finite = Field(default=125, ge=0, le=1e5)
+    cpu_mass_kg: Finite = Field(default=.05, gt=0, le=100)
+    cpu_cp_J_kgK: Finite = Field(default=700, gt=0, le=1e6)
+    board_mass_kg: Finite = Field(default=.6, gt=0, le=100)
+    board_cp_J_kgK: Finite = Field(default=900, gt=0, le=1e6)
+    interface_resistance_K_W: Finite = Field(default=.08, gt=0, le=100)
+    board_h_W_m2K: Finite = Field(default=8, ge=0, le=1e6)
+    board_area_m2: Finite = Field(default=.08, gt=0, le=100)
+    cooler_mass_kg: Finite = Field(default=.25, gt=0, le=100)
+    cooler_cp_J_kgK: Finite = Field(default=385, gt=0, le=1e6)
+    air_h_W_m2K: Finite = Field(default=80, ge=0, le=1e6)
+    air_area_m2: Finite = Field(default=.12, gt=0, le=100)
+    air_capacity_W: Finite = Field(default=250, ge=0, le=1e6)
+    water_flow_L_min: Finite = Field(default=2, gt=0, le=1e5)
+    water_inlet_C: Finite = Field(default=25, ge=-273.15, le=5000)
+    water_cp_J_kgK: Finite = Field(default=4182, gt=0, le=1e6)
+    water_cooler_UA_W_K: Finite = Field(default=180, ge=0, le=1e7)
+    radiator_UA_W_K: Finite = Field(default=120, ge=0, le=1e7)
+
+    @model_validator(mode='after')
+    def valid_steps(self):
+        if self.duration_s / self.dt_s > 200000:
+            raise ValueError('CPU 仿真最多 200000 个时间步，请增大步长或缩短时长')
         return self
 
 Material.model_rebuild()

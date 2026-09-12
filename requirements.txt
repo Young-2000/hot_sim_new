@@ -9,3 +9,5 @@ trimesh==5.1.0
 rtree==1.4.1
 h5py>=3.12,<4
 meshio==5.3.5
+# CUDA 12 runtime bindings for the optional GPU sparse solver. CPU fallback remains available.
+cupy-cuda12x>=14,<15

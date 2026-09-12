@@ -76,6 +76,11 @@ def load_stl(folder, meta):
     for i,ids in enumerate(components): outer[ids]=depth[i]%2==0;shell_id[ids]=i
     mesh.export(folder/'clean.stl')
     np.savez_compressed(folder/'shells.npz',shell_id=shell_id,depth=depth,parents=parents)
+    components_meta=[]
+    for i,ids in enumerate(components):
+        bounds=np.asarray([mesh.vertices[mesh.faces[ids]].min(axis=(0,1)),mesh.vertices[mesh.faces[ids]].max(axis=(0,1))])
+        components_meta.append(dict(component_id=i,name=f'组件 {i+1}',triangles=int(len(ids)),bounds_m=bounds.tolist(),closed=bool(shells[i].is_watertight)))
+    meta['components']=components_meta
     return mesh.vertices,np.asarray(mesh.faces),outer,watertight
 
 def prepare_model(folder):
@@ -88,6 +93,7 @@ def prepare_model(folder):
         init_gmsh()
         try:
             volumes=import_step(folder,meta);outer_tags=shell_tags(volumes)
+            meta['components']=[dict(component_id=i,name=f'组件 {i+1}',cad_volume=int(v)) for i,(_,v) in enumerate(volumes)]
             bbox=np.asarray(gmsh.model.getBoundingBox(-1,-1));size=float(max(bbox[3:]-bbox[:3]))/30
             gmsh.option.setNumber('Mesh.MeshSizeMax',size)
             gmsh.option.setNumber('Mesh.MeshSizeMin',size*.15)
@@ -186,7 +192,19 @@ def build_mesh(folder, cfg, job):
         vol=np.abs(np.linalg.det(points[tets[:,1:]]-points[tets[:,0]][:,None,:]))/6
         if not np.all(vol>0):raise ValueError('网格存在零体积单元')
         quality=np.concatenate([gmsh.model.mesh.getElementQualities(ii,'minSICN') for ty,ii in zip(types,ids) if ty==4])
-        result=dict(points=points,tets=tets,boundary_triangles=faces,is_outer=np.asarray(flags),tet_volumes=vol,minimum_quality=np.array(quality.min()))
+        thermal_components=connected_tet_components(tets,points)
+        component_id=thermal_components
+        records=meta.get('components') or []
+        if records:
+            # Keep the IDs exposed by the model metadata stable when Gmsh
+            # merges tiny touching shells during volume meshing.
+            for thermal in np.unique(thermal_components):
+                cells=thermal_components==thermal;box=np.asarray([points[tets[cells]].min(axis=(0,1)),points[tets[cells]].max(axis=(0,1))])
+                def mismatch(record):
+                    bounds=np.asarray(record.get('bounds_m',box));center_distance=np.linalg.norm(bounds.mean(0)-box.mean(0));size_distance=np.linalg.norm((bounds[1]-bounds[0])-(box[1]-box[0]))
+                    return float(center_distance+0.35*size_distance)
+                chosen=min(records,key=mismatch);component_id[cells]=int(chosen['component_id'])
+        result=dict(points=points,tets=tets,boundary_triangles=faces,is_outer=np.asarray(flags),tet_volumes=vol,minimum_quality=np.array(quality.min()),component_id=component_id)
         np.savez_compressed(job/'mesh.npz',**result)
         return result
     finally:gmsh.finalize()
@@ -196,3 +214,24 @@ def project(mesh, points, batch=4000):
     for start in range(0,len(points),batch):
         c,d,i=trimesh.proximity.closest_point(mesh,points[start:start+batch]);nearest.append(c);dist.append(d);ids.append(i)
     return np.vstack(nearest),np.concatenate(dist),np.concatenate(ids)
+
+def connected_tet_components(tets, points):
+    """Label tetrahedra that share a node; labels are ordered bottom to top."""
+    parent=np.arange(len(tets),dtype=np.int32)
+    def find(value):
+        while parent[value]!=value:
+            parent[value]=parent[parent[value]];value=parent[value]
+        return value
+    owners={}
+    for i,tet in enumerate(tets):
+        for node in tet:
+            other=owners.get(int(node))
+            if other is not None:
+                a,b=find(i),find(other)
+                if a!=b:parent[b]=a
+            owners[int(node)]=i
+    roots=np.asarray([find(i) for i in range(len(tets))],dtype=np.int32)
+    centers=points[tets].mean(axis=1);unique=np.unique(roots)
+    order=sorted(unique.tolist(),key=lambda root:(float(centers[roots==root,2].min()),float(centers[roots==root,0].min())))
+    remap={root:i for i,root in enumerate(order)}
+    return np.asarray([remap[int(root)] for root in roots],dtype=np.int32)
