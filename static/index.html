@@ -28,6 +28,7 @@
           <label class="field separated">材料预设<select id="material-preset"></select></label><label class="field">材料名称<input id="material-name" maxlength="60"></label>
           <label class="field">导热系数 k <span>W/(m·K)</span><input id="mat-k" type="number" step="0.1" min="0.001"></label>
           <div class="two"><label class="field">密度 ρ <span>kg/m³</span><input id="mat-rho" type="number" min="0.001"></label><label class="field">比热容 c <span>J/(kg·K)</span><input id="mat-cp" type="number" min="0.001"></label></div>
+          <label class="field">线膨胀系数 α <span>1/K</span><input id="mat-cte" type="number" step="0.0000001" min="0" max="1"></label>
           <label class="field">相变模型（可选）<select id="phase-enabled"><option value="off">无相变</option><option value="on">启用潜热</option></select></label><div id="phase-fields" hidden><div class="two"><label class="field">相变温度 <span>°C</span><input id="phase-melting" type="number" value="660"></label><label class="field">相变温区 <span>K</span><input id="phase-mushy" type="number" min="0.001" value="5"></label></div><label class="field">潜热 <span>J/kg</span><input id="phase-latent" type="number" min="0.001" value="397000"></label></div>
           <div class="section-heading separated"><h2>组件材料</h2></div><div id="component-list" class="entity-list"></div><p class="hint">每个不连通组件可绑定独立材料。STL 组件按共享网格节点识别；组件之间有几何间隙时，启用“组件间空气导热”即可计算间隙传热，接触热阻则用于实体接触界面。</p>
           <p class="hint">区域以方框与实体的交集定义。重叠时，下方区域优先；可为当前材料启用相变潜热。接触热阻在“计算”中统一设置。</p>
