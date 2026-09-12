@@ -308,6 +308,7 @@ def codex_plan_request(model_id, prompt, current):
                     questions=['Codex 模式需要设置 OPENAI_API_KEY；当前未配置，未调用本地解析器。'],
                     mode='codex')
     model = os.environ.get('OPENAI_MODEL', 'gpt-5.2').strip() or 'gpt-5.2'
+    base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1').strip().rstrip('/')
     metadata = read_json(MODELS / model_id / 'metadata.json')
     geometry = {
         'name': metadata.get('name'),
@@ -348,7 +349,7 @@ def codex_plan_request(model_id, prompt, current):
         },
     }, ensure_ascii=False).encode('utf-8')
     request = urllib.request.Request(
-        'https://api.openai.com/v1/responses', data=body,
+        f'{base_url}/responses', data=body,
         headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
         method='POST',
     )

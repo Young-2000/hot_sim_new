@@ -7,6 +7,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $appDirectory = $PSScriptRoot
 $env:THERMAL_DEVICE = $Device
+# Load optional Codex settings from the current user's environment. This is
+# needed when Start.ps1 runs inside a long-lived shell created before setup.
+foreach ($name in @('OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_BASE_URL')) {
+    if (-not [Environment]::GetEnvironmentVariable($name, 'Process')) {
+        $value = [Environment]::GetEnvironmentVariable($name, 'User')
+        if ($value) { Set-Item -Path "Env:$name" -Value $value }
+    }
+}
 $runtimeDirectory = Join-Path $appDirectory '.runtime'
 New-Item -ItemType Directory -Force -Path $runtimeDirectory | Out-Null
 $pythonCandidates = @((Join-Path $appDirectory '.venv\Scripts\python.exe'), 'D:\Users\zongtianyu\anaconda3\python.exe')
