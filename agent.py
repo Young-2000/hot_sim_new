@@ -393,7 +393,7 @@ def _codex_cli_plan_request(model_id, prompt, current, executable):
     except (FileNotFoundError, json.JSONDecodeError) as error:
         return dict(ok=False, config=current or {}, changes=[], warnings=[],
                     questions=[f'无法读取模型元数据：{error}'], mode='codex', provider='cli')
-    args = [executable, 'exec', '--ephemeral', '--skip-git-repo-check', '--json', '--color', 'never', '-']
+    args = [executable, 'exec', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--json', '--color', 'never', '-']
     # Let the official CLI use the model/profile selected in ~/.codex unless
     # the service explicitly overrides it for this bridge.
     model = os.environ.get('THERMAL_CODEX_MODEL', '').strip()
