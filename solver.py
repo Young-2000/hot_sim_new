@@ -374,6 +374,30 @@ def steady(M,K,C,G,loads,cfg,callback=lambda *x:None,rad_area=None,rad_ambient=N
     final=theta+cfg['initial_C'];stats.append(dict(time_s=float(cfg['duration_s']),minimum_C=float(final.min()),maximum_C=float(final.max()),average_C=float((mc@theta)/mc.sum()+cfg['initial_C']),stored_energy_J=float(mc@theta),convective_loss_W=float((C@theta-G).sum())))
     return np.asarray([np.zeros_like(theta),theta]),np.asarray([0.,cfg['duration_s']]),stats,dict(input_energy_J=float(sum(_power_at(s,cfg['duration_s']) for s in cfg['heat_sources'])),convective_energy_J=0.,energy_balance_error_J=residual,maximum_step_residual_J=residual,steady_residual=residual)
 
+
+def thermal_expansion_field(mesh, frames, labels, materials, reference_C):
+    """Compute an unconstrained isotropic thermal displacement field.
+
+    The thermal solver computes temperatures only.  For post-processing we
+    approximate free expansion about the volume centroid using each node's
+    volume-weighted CTE and temperature rise.  This is intentionally a
+    kinematic result (no structural constraints or stress solve).
+    """
+    points = np.asarray(mesh['points'], dtype=float)
+    tets = np.asarray(mesh['tets'], dtype=np.int64)
+    volumes = np.asarray(mesh['tet_volumes'], dtype=float)
+    alpha_tet = np.asarray([materials[int(label)].get('thermal_expansion_CTE_per_K', 0.)
+                            for label in labels], dtype=float)
+    node_weights = np.bincount(tets.ravel(), weights=np.repeat(volumes / 4., 4), minlength=len(points))
+    node_alpha = np.bincount(tets.ravel(), weights=np.repeat(volumes * alpha_tet / 4., 4), minlength=len(points))
+    node_alpha = np.divide(node_alpha, node_weights, out=np.zeros_like(node_alpha), where=node_weights > 0)
+    centroid = np.average(points, axis=0, weights=node_weights) if np.any(node_weights) else points.mean(axis=0)
+    radial = points - centroid
+    delta = np.asarray(frames, dtype=float) - float(reference_C)
+    displacement = delta[:, :, None] * node_alpha[None, :, None] * radial[None, :, :]
+    magnitude = np.linalg.norm(displacement, axis=2)
+    return displacement.astype('<f4'), magnitude, node_alpha, centroid
+
 def make_slice(points,tets,frames,axis,value):
     eps=max(float(np.ptp(points,axis=0).max())*1e-10,1e-14)
     coord=points[:,axis]-value;selected=tets[(coord[tets].min(1)<=eps)&(coord[tets].max(1)>=-eps)]
@@ -416,17 +440,21 @@ def export_slice(job,axis,value):
     meta=dict(key=key,vertices=len(pts),triangles=len(faces),frames=len(frames),axis=axis,value=value)
     write_json(folder/'manifest.json',meta);return meta
 
-def export_archive(job,mesh,frames,times,labels):
+def export_archive(job,mesh,frames,times,labels,displacement=None):
     dest=job/'export';dest.mkdir(exist_ok=True)
     hf=h5py.File(dest/'thermal-fields.h5','w')
     hf.create_dataset('points',data=mesh['points'],compression='gzip',shuffle=True)
     hf.create_dataset('tetra',data=mesh['tets'].astype(np.int32),compression='gzip',shuffle=True)
     hf.create_dataset('material',data=labels,compression='gzip',shuffle=True)
+    if displacement is not None:
+        for i, values in enumerate(np.asarray(displacement)):
+            hf.create_dataset(f'displacement/{i}', data=values, compression='gzip', shuffle=True)
     xml=['<?xml version="1.0"?>','<Xdmf Version="3.0"><Domain><Grid Name="Temperature" GridType="Collection" CollectionType="Temporal">']
     n=len(mesh['points']);ne=len(mesh['tets'])
     for i,t in enumerate(times):
         hf.create_dataset(f'temperature/{i}',data=frames[i],compression='gzip',shuffle=True)
-        xml.append(f'<Grid GridType="Uniform"><Time Value="{t:g}"/><Topology TopologyType="Tetrahedron" NumberOfElements="{ne}"><DataItem Dimensions="{ne} 4" NumberType="Int" Precision="4" Format="HDF">thermal-fields.h5:/tetra</DataItem></Topology><Geometry GeometryType="XYZ"><DataItem Dimensions="{n} 3" NumberType="Float" Precision="8" Format="HDF">thermal-fields.h5:/points</DataItem></Geometry><Attribute Name="Temperature_C" AttributeType="Scalar" Center="Node"><DataItem Dimensions="{n}" NumberType="Float" Precision="4" Format="HDF">thermal-fields.h5:/temperature/{i}</DataItem></Attribute><Attribute Name="Material_ID" AttributeType="Scalar" Center="Cell"><DataItem Dimensions="{ne}" NumberType="Int" Precision="4" Format="HDF">thermal-fields.h5:/material</DataItem></Attribute></Grid>')
+        disp_attr = f'<Attribute Name="Displacement_m" AttributeType="Vector" Center="Node"><DataItem Dimensions="{n} 3" NumberType="Float" Precision="4" Format="HDF">thermal-fields.h5:/displacement/{i}</DataItem></Attribute>' if displacement is not None else ''
+        xml.append(f'<Grid GridType="Uniform"><Time Value="{t:g}"/><Topology TopologyType="Tetrahedron" NumberOfElements="{ne}"><DataItem Dimensions="{ne} 4" NumberType="Int" Precision="4" Format="HDF">thermal-fields.h5:/tetra</DataItem></Topology><Geometry GeometryType="XYZ"><DataItem Dimensions="{n} 3" NumberType="Float" Precision="8" Format="HDF">thermal-fields.h5:/points</DataItem></Geometry><Attribute Name="Temperature_C" AttributeType="Scalar" Center="Node"><DataItem Dimensions="{n}" NumberType="Float" Precision="4" Format="HDF">thermal-fields.h5:/temperature/{i}</DataItem></Attribute>{disp_attr}<Attribute Name="Material_ID" AttributeType="Scalar" Center="Cell"><DataItem Dimensions="{ne}" NumberType="Int" Precision="4" Format="HDF">thermal-fields.h5:/material</DataItem></Attribute></Grid>')
     hf.close();xml.append('</Grid></Domain></Xdmf>');(dest/'temperature.xdmf').write_text('\n'.join(xml),encoding='utf-8')
     with zipfile.ZipFile(job/'result.zip','w',compression=zipfile.ZIP_DEFLATED) as z:
         for name in ('thermal-fields.h5','temperature.xdmf'):z.write(dest/name,name)
@@ -454,6 +482,13 @@ def solve_job(job):
     volume_weights=np.bincount(mesh['tets'].ravel(),weights=np.repeat(mesh['tet_volumes']/4,4),minlength=len(mesh['points']))
     for row,values in zip(stats,theta):row['average_C']=float(volume_weights@values/volume_weights.sum()+cfg['initial_C'])
     frames=theta+np.float32(cfg['initial_C']);np.save(job/'temperatures.npy',frames)
+    materials_for_expansion=[cfg['base_material']]+[r['material'] for r in cfg['regions']]+[r['material'] for r in cfg.get('component_materials',[])]
+    displacement, displacement_magnitude, node_cte, expansion_centroid = thermal_expansion_field(
+        mesh, frames, labels, materials_for_expansion, cfg['initial_C'])
+    displacement.tofile(job/'displacement.bin')
+    for row, mag in zip(stats, displacement_magnitude):
+        row['maximum_displacement_m'] = float(np.max(mag))
+        row['average_displacement_m'] = float(np.mean(mag))
     surface=np.einsum('fvi,vi->fv',frames[:,display_nodes],display_bary).astype('<f4');surface.tofile(job/'surface.bin')
     component_rows=[]
     material_rows=audit.get('materials',[])
@@ -475,10 +510,15 @@ def solve_job(job):
             material_name=material.get('name','未指定'),conductivity_k=float(material.get('k',0)),density_rho=float(material.get('rho',0)),specific_heat_cp=float(material.get('cp',0)),
             thermal_diffusivity_m2_s=diffusivity,diffusion_length_m=length_scale,diffusion_time_estimate_s=float(length_scale**2/diffusivity) if diffusivity>0 else None,
             minimum_C=float(values.min()),maximum_C=float(values.max()),final_minimum_C=float(values[-1].min()),final_maximum_C=float(values[-1].max()),final_average_C=float(values[-1].mean()),
-            peak_average_rise_C=peak_rise,time_to_half_peak_s=half_time))
+            peak_average_rise_C=peak_rise,time_to_half_peak_s=half_time,
+            final_maximum_displacement_m=float(displacement_magnitude[-1, node_ids].max()) if len(node_ids) else 0.0,
+            peak_maximum_displacement_m=float(displacement_magnitude[:, node_ids].max()) if len(node_ids) else 0.0))
     audit.update(energy=energy,nodes=len(mesh['points']),tetrahedra=len(mesh['tets']),minimum_quality=float(mesh.get('minimum_quality',0)),stats=stats,components=component_rows,device=device,
+        thermal_expansion=dict(enabled=bool(np.any(node_cte > 0)), reference_C=float(cfg['initial_C']), centroid_m=expansion_centroid.tolist(),
+            cte_min_per_K=float(node_cte.min()) if len(node_cte) else 0., cte_max_per_K=float(node_cte.max()) if len(node_cte) else 0.,
+            maximum_displacement_m=float(displacement_magnitude.max()), final_maximum_displacement_m=float(displacement_magnitude[-1].max())),
         material_interface='CAD-conforming box fragments' if read_json(folder/'metadata.json')['kind']=='step' else 'element-centroid assignment; refine mesh at material interfaces',
-        assumptions=['constant material properties outside phase-change intervals','smeared interface resistance when configured','prescribed convection coefficient plus optional surface radiation','air gaps use reduced-order conduction k_air*A/gap; no airflow/CFD solve'])
+        assumptions=['constant material properties outside phase-change intervals','smeared interface resistance when configured','prescribed convection coefficient plus optional surface radiation','air gaps use reduced-order conduction k_air*A/gap; no airflow/CFD solve','thermal expansion is reported as unconstrained isotropic free expansion; no stress or mechanical constraint solve'])
     warnings=[]
     lower_bound=min([cfg['initial_C'],cfg['ambient_C']]+[c['ambient_C'] for c in cfg['cooling']])
     undershoot=lower_bound-float(frames.min())
@@ -508,12 +548,17 @@ def solve_job(job):
     write_json(job/'audit.json',audit)
     with (job/'history.csv').open('w',newline='',encoding='utf-8-sig') as f:
         writer=csv.DictWriter(f,fieldnames=stats[0].keys());writer.writeheader();writer.writerows(stats)
-    manifest=dict(times_s=times.tolist(),vertices=surface.shape[1],frames=len(times),minimum_C=float(frames.min()),maximum_C=float(frames.max()),stats=stats,summary=audit)
+    manifest=dict(times_s=times.tolist(),vertices=surface.shape[1],frames=len(times),minimum_C=float(frames.min()),maximum_C=float(frames.max()),
+        displacement_vertices=int(displacement.shape[1]), displacement_frames=int(displacement.shape[0]),
+        maximum_displacement_m=float(displacement_magnitude.max()), final_maximum_displacement_m=float(displacement_magnitude[-1].max()),
+        thermal_expansion=dict(reference_C=float(cfg['initial_C']), centroid_m=expansion_centroid.tolist(),
+            max_displacement_m=float(displacement_magnitude.max()), cte_min_per_K=float(node_cte.min()), cte_max_per_K=float(node_cte.max())),
+        stats=stats,summary=audit)
     write_json(job/'result.json',manifest)
     write_report(job,cfg,folder,audit,energy)
     progress(job,'running',88,'生成内部剖面和完整结果文件')
     bounds=np.array(read_json(folder/'metadata.json')['bounds_m']);export_slice(job,0,float(bounds[:,0].mean()))
-    export_archive(job,mesh,frames,times,labels)
+    export_archive(job,mesh,frames,times,labels,displacement)
     progress(job,'completed',100,'计算完成',finished_at=time.time())
 
 def write_report(job,cfg,folder,audit,energy):
@@ -524,12 +569,14 @@ def write_report(job,cfg,folder,audit,energy):
         half='-' if row.get('time_to_half_peak_s') is None else f'{row["time_to_half_peak_s"]:.1f}'
         diffusion_time='-' if row.get('diffusion_time_estimate_s') is None else f'{row["diffusion_time_estimate_s"]:.3g}'
         lines.append(f'| 组件 {row["component_id"]+1} | {row.get("material_name","未指定")} | {row.get("conductivity_k",0):.6g} | {row.get("thermal_diffusivity_m2_s",0):.6g} | {diffusion_time} | {row["final_average_C"]:.2f} | {row.get("peak_average_rise_C",0):.2f} | {half} |')
-    lines+=['','组件温度范围：最低/最高温度与末帧平均温度已写入 `audit.json`；`α = k/(ρ·cp)` 越大，材料内部温度扰动理论上传播越快。','','## 时间与热源','',f'- 仿真时长：{float(cfg["duration_s"]):g} s',f'- 计算步长：{float(cfg["dt_s"]):g} s，保存间隔：{float(cfg["save_s"]):g} s']
+    lines+=['','组件温度范围：最低/最高温度与末帧平均温度已写入 `audit.json`；`α = k/(ρ·cp)` 越大，材料内部温度扰动理论上传播越快。']
+    expansion=audit.get('thermal_expansion',{})
+    lines+=['','## 热胀冷缩','',f'- 状态：{"启用" if expansion.get("enabled") else "未提供线膨胀系数"}',f'- 参考温度：{float(expansion.get("reference_C",cfg.get("initial_C",25))):g} °C',f'- 最大自由热位移：{float(expansion.get("maximum_displacement_m",0))*1000:.6g} mm', '- 位移场写入 `displacement.bin`；结果为无约束各向同性自由膨胀近似，不包含应力/约束反力。','', '## 时间与热源','',f'- 仿真时长：{float(cfg["duration_s"]):g} s',f'- 计算步长：{float(cfg["dt_s"]):g} s，保存间隔：{float(cfg["save_s"]):g} s']
     for heat in cfg.get('heat_sources',[]):lines.append(f'- 热源“{heat["name"]}”：{float(heat["power_W"]):g} W，作用时间 {float(heat["start_s"]):g}–{float(heat["end_s"]):g} s')
-    lines+=['','## 材料','', '| 材料 | 导热系数 k | 密度 | 比热容 | 热扩散率 α (m²/s) | 体积 (m³) |','|---|---:|---:|---:|---:|---:|']
+    lines+=['','## 材料','', '| 材料 | 导热系数 k | 密度 | 比热容 | 线膨胀系数 (1/K) | 热扩散率 α (m²/s) | 体积 (m³) |','|---|---:|---:|---:|---:|---:|---:|']
     for material in audit.get('materials',[]):
         diffusivity=material["k"]/(material["rho"]*material["cp"]) if material.get("rho") and material.get("cp") else 0
-        lines.append(f'| {material["name"]} | {material["k"]:.6g} | {material["rho"]:.6g} | {material["cp"]:.6g} | {diffusivity:.6g} | {material.get("volume_m3",0):.6g} |')
+        lines.append(f'| {material["name"]} | {material["k"]:.6g} | {material["rho"]:.6g} | {material["cp"]:.6g} | {material.get("thermal_expansion_CTE_per_K",0):.6g} | {diffusivity:.6g} | {material.get("volume_m3",0):.6g} |')
     lines+=['','## 能量与数值检查',f'- 输入能量：{energy.get("input_energy_J",0):.6g} J',f'- 对流/辐射损失：{energy.get("convective_energy_J",0):.6g} J',f'- 能量平衡误差：{energy.get("energy_balance_error_J",0):.6g} J',f'- 网格节点：{audit.get("nodes",0)}，四面体：{audit.get("tetrahedra",0)}']
     gap=audit.get('air_gap',{})
     lines+=['','## 空气间隙传热',f'- 状态：{"启用" if gap.get("enabled") else "关闭"}',f'- 空气导热系数：{float(gap.get("k_air_W_mK",cfg.get("air_gap_k_W_mK",.026))):.6g} W/(m·K)',f'- 最大建模间隙：{float(gap.get("max_gap_m",cfg.get("air_gap_max_m",.05))):.6g} m',f'- 表面耦合对数：{int(gap.get("pairs",0))}',f'- 有效耦合面积：{float(gap.get("area_m2",0)):.6g} m²',f'- 总空气导热系数：{float(gap.get("conductance_W_K",0)):.6g} W/K']

@@ -11,6 +11,9 @@ class Material(Strict):
     k: Finite = Field(gt=0, le=10000)
     rho: Finite = Field(gt=0, le=100000)
     cp: Finite = Field(gt=0, le=100000)
+    # Isotropic linear thermal expansion coefficient, 1/K.  Zero keeps
+    # backwards compatibility for materials without expansion data.
+    thermal_expansion_CTE_per_K: Finite = Field(default=0, ge=0, le=1)
     phase_change: 'PhaseChange | None' = None
 
 class PhaseChange(Strict):
@@ -24,11 +27,11 @@ class PhaseChange(Strict):
         return self
 
 PRESETS = [
-    dict(name='铜 C11000',k=391,rho=8910,cp=385),
-    dict(name='铝（示例）',k=205,rho=2700,cp=900),
-    dict(name='铁（示例）',k=80,rho=7870,cp=449),
-    dict(name='碳钢（示例）',k=50,rho=7850,cp=470),
-    dict(name='不锈钢（示例）',k=16,rho=8000,cp=500),
+    dict(name='铜 C11000',k=391,rho=8910,cp=385,thermal_expansion_CTE_per_K=16.5e-6),
+    dict(name='铝（示例）',k=205,rho=2700,cp=900,thermal_expansion_CTE_per_K=23.1e-6),
+    dict(name='铁（示例）',k=80,rho=7870,cp=449,thermal_expansion_CTE_per_K=11.8e-6),
+    dict(name='碳钢（示例）',k=50,rho=7850,cp=470,thermal_expansion_CTE_per_K=12e-6),
+    dict(name='不锈钢（示例）',k=16,rho=8000,cp=500,thermal_expansion_CTE_per_K=17.3e-6),
 ]
 
 class Region(Strict):
