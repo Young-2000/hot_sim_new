@@ -588,17 +588,17 @@ def write_report(job,cfg,folder,audit,energy):
 
 
 def write_report_pdf(path, text):
-    """Render the Markdown report as a compact, portable PDF.
-
-    ReportLab is preferred (and declared in requirements). A tiny built-in
-    writer keeps completed jobs exportable when dependencies have not yet been
-    installed; unsupported glyphs are replaced only in that fallback path.
-    """
+    """Render the Markdown report as a readable PDF with headings and tables."""
     try:
-        from reportlab.pdfgen import canvas
         from reportlab.lib.pagesizes import A4
+        from reportlab.lib import colors
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
+        from xml.sax.saxutils import escape
+        import re
         font_name='Helvetica'
         # Prefer standalone TTF files.  Some ReportLab/PDF viewers only
         # expose the first 128 glyphs when a TTC collection is embedded.
@@ -611,20 +611,36 @@ def write_report_pdf(path, text):
                     break
                 except Exception:
                     pass
-        page_w,page_h=A4
-        pdf=canvas.Canvas(str(path), pagesize=A4)
-        pdf.setTitle('Thermal Studio 仿真报告')
-        pdf.setFont(font_name, 9)
-        y=page_h-42
-        for raw in text.splitlines():
-            line=raw.replace('**','').replace('`','')
-            # Keep line lengths readable on A4 without pulling in a parser.
-            chunks=[line[i:i+92] for i in range(0,max(1,len(line)),92)] or ['']
-            for chunk in chunks:
-                if y<38:
-                    pdf.showPage();pdf.setFont(font_name,9);y=page_h-42
-                pdf.drawString(38,y,chunk);y-=13
-        pdf.save()
+        styles=getSampleStyleSheet()
+        body=ParagraphStyle('ThermalBody', parent=styles['BodyText'], fontName=font_name, fontSize=8.5, leading=12, spaceAfter=4)
+        heading=ParagraphStyle('ThermalHeading', parent=body, fontSize=13, leading=17, spaceBefore=8, spaceAfter=5)
+        subheading=ParagraphStyle('ThermalSubheading', parent=body, fontSize=10, leading=13, spaceBefore=7, spaceAfter=3)
+        bullet=ParagraphStyle('ThermalBullet', parent=body, leftIndent=10, firstLineIndent=-7)
+        def inline(value):
+            value=escape(value.replace('`',''))
+            return re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', value)
+        story=[]; lines=text.splitlines(); i=0
+        while i<len(lines):
+            raw=lines[i].strip()
+            if not raw: story.append(Spacer(1,3)); i+=1; continue
+            if raw.startswith('|'):
+                rows=[]
+                while i<len(lines) and lines[i].strip().startswith('|'):
+                    cells=[c.strip() for c in lines[i].strip().strip('|').split('|')]
+                    if not all(set(c)<=set('-: ') for c in cells): rows.append(cells)
+                    i+=1
+                if rows:
+                    width=max(len(r) for r in rows); rows=[r+['']*(width-len(r)) for r in rows]
+                    table=Table([[Paragraph(inline(c),body) for c in r] for r in rows], repeatRows=1, hAlign='LEFT')
+                    table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.25,colors.HexColor('#aab4bf')),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4),('TOPPADDING',(0,0),(-1,-1),3),('BOTTOMPADDING',(0,0),(-1,-1),3)])); story.append(table); story.append(Spacer(1,5))
+                continue
+            if raw.startswith('## '): story.append(Paragraph(inline(raw[3:]),subheading))
+            elif raw.startswith('# '): story.append(Paragraph(inline(raw[2:]),heading))
+            elif raw.startswith('- '): story.append(Paragraph('• '+inline(raw[2:]),bullet))
+            else: story.append(Paragraph(inline(raw),body))
+            i+=1
+        doc=SimpleDocTemplate(str(path),pagesize=A4,rightMargin=15*mm,leftMargin=15*mm,topMargin=14*mm,bottomMargin=14*mm,title='Thermal Studio 仿真报告')
+        doc.build(story)
         return
     except Exception:
         pass
