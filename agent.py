@@ -2,13 +2,15 @@ import copy
 import json
 import os
 import re
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 import numpy as np
 
-from runtime import MODELS, read_json
+from runtime import MODELS, ROOT, read_json
 from schemas import PRESETS, Simulation
 
 
@@ -296,19 +298,7 @@ def _json_from_text(text):
         raise
 
 
-def codex_plan_request(model_id, prompt, current):
-    """Generate a Simulation config with the OpenAI Responses API.
-
-    This path is deliberately explicit: missing credentials or API failures
-    are reported to the caller and never fall back to the local parser.
-    """
-    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
-    if not api_key:
-        return dict(ok=False, config=current or {}, changes=[], warnings=[],
-                    questions=['Codex 模式需要设置 OPENAI_API_KEY；当前未配置，未调用本地解析器。'],
-                    mode='codex')
-    model = os.environ.get('OPENAI_MODEL', 'gpt-5.2').strip() or 'gpt-5.2'
-    base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1').strip().rstrip('/')
+def _codex_context(model_id, prompt, current):
     metadata = read_json(MODELS / model_id / 'metadata.json')
     geometry = {
         'name': metadata.get('name'),
@@ -318,6 +308,118 @@ def codex_plan_request(model_id, prompt, current):
         'components': metadata.get('components', []),
     }
     schema = Simulation.model_json_schema()
+    return schema, geometry
+
+
+def _codex_prompt(model_id, prompt, current):
+    schema, geometry = _codex_context(model_id, prompt, current)
+    instructions = (
+        '你是 Thermal Studio 的仿真配置助手。根据用户描述生成完整、可执行的 Simulation JSON 配置。'
+        '只输出一个 JSON 对象，不要 Markdown、解释或额外字段。必须符合给定 JSON Schema；'
+        '保留当前配置中未被用户修改的字段。不要虚构不存在的表面编号；无法确定时在 JSON 中保留原值。'
+    )
+    user_input = {
+        'model_id': model_id,
+        'geometry': geometry,
+        'current_config': current or {},
+        'request': prompt.strip(),
+        'simulation_schema': schema,
+    }
+    return instructions + '\n输入数据：\n' + json.dumps(user_input, ensure_ascii=False)
+
+
+def _validated_codex_text(text, current):
+    if not text:
+        raise ValueError('Codex 未返回文本结果')
+    config = _json_from_text(text)
+    validated = Simulation.model_validate(config)
+    return validated.model_dump(mode='json')
+
+
+def _find_codex_cli():
+    configured = os.environ.get('THERMAL_CODEX_COMMAND', '').strip()
+    if configured:
+        path = Path(configured).expanduser()
+        if path.is_file():
+            return str(path)
+        found = shutil.which(configured)
+        if found:
+            return found
+    for name in ('codex.exe', 'codex'):
+        found = shutil.which(name)
+        if found:
+            return found
+    local_app_data = os.environ.get('LOCALAPPDATA', '')
+    if local_app_data:
+        candidates = sorted(Path(local_app_data).glob('Programs/OpenAI Codex CLI/*/bin/codex.exe'), reverse=True)
+        if candidates:
+            return str(candidates[0])
+    return None
+
+
+def _cli_response_text(stdout):
+    """Extract the final agent message from Codex CLI JSONL events."""
+    chunks = []
+    for line in (stdout or '').splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get('item') if isinstance(event, dict) else None
+        if isinstance(item, dict) and item.get('type') == 'agent_message' and isinstance(item.get('text'), str):
+            chunks.append(item['text'])
+    return '\n'.join(chunks).strip()
+
+
+def _codex_cli_plan_request(model_id, prompt, current, executable):
+    try:
+        cli_prompt = _codex_prompt(model_id, prompt, current)
+    except (FileNotFoundError, json.JSONDecodeError) as error:
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=[f'无法读取模型元数据：{error}'], mode='codex', provider='cli')
+    args = [executable, 'exec', '--ephemeral', '--skip-git-repo-check', '--json', '--color', 'never', '-']
+    # Let the official CLI use the model/profile selected in ~/.codex unless
+    # the service explicitly overrides it for this bridge.
+    model = os.environ.get('THERMAL_CODEX_MODEL', '').strip()
+    if model:
+        args[2:2] = ['--model', model]
+    try:
+        completed = subprocess.run(
+            args, input=cli_prompt, text=True, encoding='utf-8', capture_output=True,
+            cwd=str(ROOT), timeout=120,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=[f'无法启动本机 Codex CLI：{error}'], mode='codex', provider='cli')
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or '').strip()[-800:]
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=[f'本机 Codex CLI 请求失败（退出码 {completed.returncode}）：{detail}'],
+                    mode='codex', provider='cli')
+    try:
+        config = _validated_codex_text(_cli_response_text(completed.stdout), current)
+    except Exception as error:
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=[f'Codex 返回的配置无法通过 Simulation 校验：{str(error).split(chr(10))[0]}'],
+                    mode='codex', provider='cli')
+    return dict(ok=True, config=config, changes=['已由本机 Codex 生成配置'],
+                warnings=[], questions=[], mode='codex', provider='cli', model=model or None)
+
+
+def _codex_api_plan_request(model_id, prompt, current):
+    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
+    if not api_key:
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=['Codex API 模式需要设置 OPENAI_API_KEY；当前未配置。'],
+                    mode='codex', provider='api')
+    model = os.environ.get('OPENAI_MODEL', 'gpt-5.2').strip() or 'gpt-5.2'
+    base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1').strip().rstrip('/')
+    try:
+        schema, geometry = _codex_context(model_id, prompt, current)
+    except (FileNotFoundError, json.JSONDecodeError) as error:
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=[f'无法读取模型元数据：{error}'], mode='codex', provider='api')
     instructions = (
         '你是 Thermal Studio 的仿真配置助手。根据用户描述生成完整、可执行的 Simulation JSON 配置。'
         '只输出一个 JSON 对象，不要 Markdown、解释或额外字段。必须符合给定 JSON Schema；'
@@ -359,18 +461,38 @@ def codex_plan_request(model_id, prompt, current):
     except urllib.error.HTTPError as error:
         detail = error.read().decode('utf-8', errors='replace')[:500]
         return dict(ok=False, config=current or {}, changes=[], warnings=[],
-                    questions=[f'Codex 请求失败（HTTP {error.code}）：{detail}'], mode='codex')
+                    questions=[f'Codex 请求失败（HTTP {error.code}）：{detail}'], mode='codex', provider='api')
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         return dict(ok=False, config=current or {}, changes=[], warnings=[],
-                    questions=[f'无法连接 Codex API：{error}'], mode='codex')
+                    questions=[f'无法连接 Codex API：{error}'], mode='codex', provider='api')
     try:
         text = _response_text(payload)
         if not text:
             raise ValueError('Responses API 未返回文本结果')
-        config = _json_from_text(text)
-        validated = Simulation.model_validate(config)
+        config = _validated_codex_text(text, current)
     except Exception as error:
         return dict(ok=False, config=current or {}, changes=[], warnings=[],
-                    questions=[f'Codex 返回的配置无法通过 Simulation 校验：{str(error).split(chr(10))[0]}'], mode='codex')
-    return dict(ok=True, config=validated.model_dump(mode='json'), changes=['已由 Codex 生成配置'],
-                warnings=[], questions=[], mode='codex', model=model)
+                    questions=[f'Codex 返回的配置无法通过 Simulation 校验：{str(error).split(chr(10))[0]}'], mode='codex', provider='api')
+    return dict(ok=True, config=config, changes=['已由 Codex 生成配置'],
+                warnings=[], questions=[], mode='codex', provider='api', model=model)
+
+
+def codex_plan_request(model_id, prompt, current):
+    """Generate a validated Simulation config using the local Codex client by default.
+
+    Set THERMAL_CODEX_PROVIDER=api to use the legacy Responses API. ``auto``
+    uses the local client when available and otherwise requires an API key.
+    """
+    provider = os.environ.get('THERMAL_CODEX_PROVIDER', 'cli').strip().lower() or 'cli'
+    if provider not in ('cli', 'api', 'auto'):
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=['THERMAL_CODEX_PROVIDER 必须是 cli、api 或 auto。'], mode='codex')
+    if provider in ('cli', 'auto'):
+        executable = _find_codex_cli()
+        if executable:
+            return _codex_cli_plan_request(model_id, prompt, current, executable)
+        if provider == 'cli':
+            return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                        questions=['未找到本机 Codex CLI（codex.exe）。请安装官方 Codex CLI，或设置 THERMAL_CODEX_PROVIDER=api。'],
+                        mode='codex', provider='cli')
+    return _codex_api_plan_request(model_id, prompt, current)

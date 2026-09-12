@@ -6,7 +6,7 @@
 
 计算默认使用 CUDA GPU（CuPy 稀疏共轭梯度求解器），网格生成、有限元组装和结果导出仍在 CPU 执行。启动后可通过 `/api/health` 查看 `compute.device` 和 GPU 名称。设置 `THERMAL_DEVICE=cpu` 可强制使用 CPU；设置为 `cuda` 时若 CUDA 不可用会直接报错，`auto`（默认）会自动回退到 CPU。`THERMAL_CUDA_DEVICE` 可选择 CUDA 卡编号。
 
-仿真助手提供两种模式：`local` 使用本地规则解析器，无需联网；`codex` 通过 OpenAI Responses API 生成配置，需先设置 `OPENAI_API_KEY`，可用 `OPENAI_MODEL` 指定模型（默认 `gpt-5.2`），可用 `OPENAI_BASE_URL` 指定兼容 Responses API 的服务地址（默认 `https://api.openai.com/v1`）。Codex 模式请求失败或未配置密钥时会明确提示，不会静默切换到本地模式。
+仿真助手提供两种模式：`local` 使用本地规则解析器，无需联网；`codex` 优先调用本机官方 `codex exec` 使用当前 Codex 登录态生成配置，找不到 CLI 时才使用 OpenAI Responses API。API 方式需设置 `OPENAI_API_KEY`，可用 `OPENAI_MODEL` 和 `OPENAI_BASE_URL` 配置。Codex 模式请求失败时会明确提示，不会静默切换到本地模式。设置 `THERMAL_CODEX_PROVIDER=api` 可强制使用 API，设置 `THERMAL_CODEX_MODEL` 可指定 CLI 模型。
 
 支持 STL/STEP 导入、铜/铝/铁等材料及自定义物性、实体内部方框分区、鼠标刷选和按朝向选取热源/散热面、稳态与瞬态导热、多个热源及功率曲线、温控启停、对流与辐射、相变潜热、等效接触热阻、三维温度播放、任意轴向剖切、保存算例、运行记录、CSV 与 ParaView 导出。另有集中参数换热系数反推、安全功率优化和热泵/制冷循环 COP 估算页面。
 
