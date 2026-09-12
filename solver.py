@@ -600,10 +600,13 @@ def write_report_pdf(path, text):
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
         font_name='Helvetica'
-        for candidate in (r'C:\\Windows\\Fonts\\msyh.ttc', r'C:\\Windows\\Fonts\\simsun.ttc'):
+        # Prefer standalone TTF files.  Some ReportLab/PDF viewers only
+        # expose the first 128 glyphs when a TTC collection is embedded.
+        for candidate in (r'C:\Windows\Fonts\simhei.ttf', r'C:\Windows\Fonts\simsunb.ttf', r'C:\Windows\Fonts\msyh.ttc', r'C:\Windows\Fonts\simsun.ttc'):
             if os.path.exists(candidate):
                 try:
-                    pdfmetrics.registerFont(TTFont('ThermalCJK', candidate, subfontIndex=0))
+                    kwargs={'subfontIndex':0} if candidate.lower().endswith('.ttc') else {}
+                    pdfmetrics.registerFont(TTFont('ThermalCJK', candidate, **kwargs))
                     font_name='ThermalCJK'
                     break
                 except Exception:
@@ -616,7 +619,7 @@ def write_report_pdf(path, text):
         for raw in text.splitlines():
             line=raw.replace('**','').replace('`','')
             # Keep line lengths readable on A4 without pulling in a parser.
-            chunks=[line[i:i-92] for i in range(0,max(1,len(line)),92)] or ['']
+            chunks=[line[i:i+92] for i in range(0,max(1,len(line)),92)] or ['']
             for chunk in chunks:
                 if y<38:
                     pdf.showPage();pdf.setFont(font_name,9);y=page_h-42
