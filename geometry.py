@@ -5,6 +5,98 @@ import gmsh, trimesh
 
 SCALES={'mm':.001,'cm':.01,'m':1.}
 
+def inspect_stl_quality(mesh):
+    """Return topology and surface-quality diagnostics for an STL mesh.
+
+    Trimesh has useful boolean properties, but exposing the counts makes an
+    import failure actionable (for example, distinguishing a four-edge hole
+    from a non-manifold junction).  This function intentionally does not
+    mutate the mesh; callers may still run the existing cleanup pipeline.
+    """
+    faces = np.asarray(mesh.faces)
+    vertices = np.asarray(mesh.vertices)
+    face_count = int(len(faces))
+    vertex_count = int(len(vertices))
+    if not face_count or not vertex_count:
+        return {
+            'status': 'error', 'vertices': vertex_count, 'triangles': face_count,
+            'watertight': False, 'winding_consistent': False,
+            'boundary_edges': 0, 'non_manifold_edges': 0,
+            'degenerate_triangles': face_count, 'invalid_normals': 0,
+            'inverted_components': 0, 'connected_components': 0,
+            'warnings': ['STL 不包含有效顶点或三角形'],
+        }
+
+    try:
+        areas = np.asarray(mesh.area_faces, dtype=float)
+    except Exception:
+        areas = np.zeros(face_count, dtype=float)
+    scale = max(float(np.ptp(vertices, axis=0).max()), 1e-12)
+    degenerate = int(np.count_nonzero(~np.isfinite(areas) | (areas <= scale * scale * 1e-14)))
+
+    invalid_normals = 0
+    try:
+        normals = np.asarray(mesh.face_normals, dtype=float)
+        invalid_normals = int(np.count_nonzero(~np.isfinite(normals).all(axis=1) |
+                                                 (np.linalg.norm(normals, axis=1) <= 1e-12)))
+    except Exception:
+        invalid_normals = face_count
+
+    boundary_edges = 0
+    non_manifold_edges = 0
+    try:
+        edge_counts = np.bincount(np.asarray(mesh.edges_unique_inverse, dtype=np.int64))
+        boundary_edges = int(np.count_nonzero(edge_counts == 1))
+        non_manifold_edges = int(np.count_nonzero(edge_counts > 2))
+    except Exception:
+        # Keep the import diagnostic useful even for a malformed mesh object.
+        boundary_edges = -1
+        non_manifold_edges = -1
+
+    try:
+        winding_consistent = bool(mesh.is_winding_consistent)
+    except Exception:
+        winding_consistent = False
+    try:
+        watertight = bool(mesh.is_watertight)
+    except Exception:
+        watertight = False
+    try:
+        components = trimesh.graph.connected_components(mesh.face_adjacency, nodes=np.arange(face_count), min_len=1)
+        component_count = int(len(components))
+        inverted_components = 0
+        for ids in components:
+            part = mesh.submesh([ids], append=True, repair=False)
+            if part.is_watertight and float(part.volume) < 0:
+                inverted_components += 1
+    except Exception:
+        component_count = 0
+        inverted_components = 0
+
+    warnings = []
+    if boundary_edges > 0:
+        warnings.append(f'存在 {boundary_edges} 条开口边界（可能有孔洞或未封口）')
+    if non_manifold_edges > 0:
+        warnings.append(f'存在 {non_manifold_edges} 条非流形边')
+    if degenerate > 0:
+        warnings.append(f'存在 {degenerate} 个退化三角形')
+    if invalid_normals > 0:
+        warnings.append(f'存在 {invalid_normals} 个无效面法向')
+    if not winding_consistent:
+        warnings.append('面法向方向不一致（可能包含反法向）')
+    if inverted_components > 0:
+        warnings.append(f'存在 {inverted_components} 个反向封闭组件')
+    fatal = (not watertight) or non_manifold_edges > 0 or invalid_normals > 0
+    return {
+        'status': 'error' if fatal else ('warning' if warnings else 'ok'),
+        'vertices': vertex_count, 'triangles': face_count,
+        'watertight': watertight, 'winding_consistent': winding_consistent,
+        'boundary_edges': boundary_edges, 'non_manifold_edges': non_manifold_edges,
+        'degenerate_triangles': degenerate, 'invalid_normals': invalid_normals,
+        'inverted_components': inverted_components, 'connected_components': component_count,
+        'warnings': warnings,
+    }
+
 def init_gmsh():
     gmsh.initialize()
     gmsh.option.setNumber('General.Terminal',1)
@@ -60,6 +152,7 @@ def write_display(folder, points, faces, outer):
 
 def load_stl(folder, meta):
     mesh=trimesh.load(folder/meta['source'],force='mesh',process=True)
+    quality=inspect_stl_quality(mesh)
     mesh.update_faces(mesh.nondegenerate_faces());mesh.remove_unreferenced_vertices();mesh.merge_vertices()
     mesh.vertices*=SCALES[meta['units']]*meta.get('scale_factor',1.)
     if not len(mesh.faces): raise ValueError('STL 中没有有效三角形')
@@ -81,6 +174,7 @@ def load_stl(folder, meta):
         bounds=np.asarray([mesh.vertices[mesh.faces[ids]].min(axis=(0,1)),mesh.vertices[mesh.faces[ids]].max(axis=(0,1))])
         components_meta.append(dict(component_id=i,name=f'组件 {i+1}',triangles=int(len(ids)),bounds_m=bounds.tolist(),closed=bool(shells[i].is_watertight)))
     meta['components']=components_meta
+    meta['geometry_quality']=quality
     return mesh.vertices,np.asarray(mesh.faces),outer,watertight
 
 def prepare_model(folder):
@@ -88,7 +182,13 @@ def prepare_model(folder):
     if meta['kind']=='stl':
         points,faces,outer,valid=load_stl(folder,meta)
         meta['mesh_ready']=valid
-        meta['warning']='' if valid else 'STL 存在开口或非流形结构，可预览；运行前请修复或使用对应 STEP。'
+        quality=meta.get('geometry_quality',{})
+        quality_warnings=quality.get('warnings',[])
+        if valid:
+            meta['warning']='；'.join(quality_warnings)
+        else:
+            detail='；'.join(quality_warnings) or '存在开口或非流形结构'
+            meta['warning']=f'STL 几何质量检查未通过：{detail}。可预览；运行前请修复或使用对应 STEP。'
     else:
         init_gmsh()
         try:
