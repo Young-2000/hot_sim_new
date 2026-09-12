@@ -253,7 +253,7 @@ def make_plan(model_id, prompt, current):
     if cfg.get('heat_sources') and cfg['heat_sources'][0].get('source_type','surface')=='surface' and cfg['heat_sources'][0].get('placement','surface')!='embedded' and not cfg['heat_sources'][0].get('faces'):
         questions.append('请指定受热面：可在三维视图刷选，或在描述中写“整个外表面”“左侧/顶部”或“x=10 mm”。')
     if not cfg.get('heat_sources') and power is None:
-        warnings.append('没有识别到热源功率；当前算例可能保持等温。')
+        questions.append('草案缺少热源：请明确热源功率与受热面，或点热源位置，再生成配置。')
     if cfg.get('duration_s', 3600) / max(cfg.get('save_s', 15), 1) > 300:
         warnings.append('保存帧数超过 301，已建议把保存间隔调大。')
     try:
@@ -298,6 +298,46 @@ def _json_from_text(text):
         raise
 
 
+def _surface_selections(model_id):
+    """Resolve named exterior patches to actual imported display-face IDs.
+
+    Axis patches use exterior triangle centroids in the outermost 3% of that
+    axis, with normals facing the requested direction. No guessed face IDs or
+    fallback to the entire surface is used for an unavailable patch.
+    """
+    display = read_json(MODELS / model_id / 'display.json')
+    points = np.asarray(display['points'], dtype=float).reshape(-1, 3)
+    faces = np.asarray(display['faces'], dtype=np.int64).reshape(-1, 3)
+    tri = points[faces]
+    centers = tri.mean(axis=1)
+    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    lengths = np.linalg.norm(cross, axis=1)
+    normals = cross / np.maximum(lengths[:, None], 1e-30)
+    outer = np.asarray(display.get('is_outer', np.ones(len(faces))), dtype=bool)
+    valid = outer & (lengths > 0)
+    selections = {}
+
+    def add(key, name, mask):
+        ids = np.flatnonzero(mask).tolist()
+        selections[key] = dict(name=name, faces=ids, face_count=len(ids),
+                               area_m2=float(lengths[mask].sum() / 2))
+
+    add('all_outer', '全部外表面', valid)
+    for key, name, axis, sign in (
+        ('top', '顶部 (+Z)', 2, 1), ('bottom', '底部 (-Z)', 2, -1),
+        ('right', '右侧 (+X)', 0, 1), ('left', '左侧 (-X)', 0, -1),
+        ('back', '后侧 (+Y)', 1, 1), ('front', '前侧 (-Y)', 1, -1),
+    ):
+        mask = np.zeros(len(faces), dtype=bool)
+        if np.any(valid):
+            values = centers[valid, axis]
+            edge = values.max() if sign > 0 else values.min()
+            tolerance = max(float(np.ptp(values)) * .03, 1e-10)
+            mask = valid & (np.abs(centers[:, axis] - edge) <= tolerance) & (normals[:, axis] * sign > .35)
+        add(key, name, mask)
+    return selections
+
+
 def _codex_context(model_id, prompt, current):
     metadata = read_json(MODELS / model_id / 'metadata.json')
     geometry = {
@@ -306,8 +346,19 @@ def _codex_context(model_id, prompt, current):
         'dimensions_m': metadata.get('dimensions_m'),
         'triangles': metadata.get('triangles'),
         'components': metadata.get('components', []),
+        'surface_selections': [dict(id=key, **{k: v for k, v in selection.items() if k != 'faces'})
+                               for key, selection in _surface_selections(model_id).items()],
+        'selection_rule': '轴向选区取最外侧 3% 范围内、法向朝向该方向的外表面三角面；编号由后端映射。',
     }
     schema = Simulation.model_json_schema()
+    # The assistant uses semantic selectors; the solver still receives only
+    # ordinary Simulation fields with resolved triangle IDs.
+    selector = dict(type='string', enum=['top', 'bottom', 'right', 'left', 'back', 'front', 'all_outer'])
+    for name in ('Heat', 'Cooling'):
+        schema['$defs'][name]['properties']['surface_selection'] = selector
+    schema['$defs']['Cooling']['required'] = [key for key in schema['$defs']['Cooling']['required'] if key != 'faces']
+    schema['properties']['heat_sources']['minItems'] = 1
+    schema['required'] = list(dict.fromkeys([*schema.get('required', []), 'heat_sources']))
     return schema, geometry
 
 
@@ -315,25 +366,69 @@ def _codex_prompt(model_id, prompt, current):
     schema, geometry = _codex_context(model_id, prompt, current)
     instructions = (
         '你是 Thermal Studio 的仿真配置助手。根据用户描述生成完整、可执行的 Simulation JSON 配置。'
-        '只输出一个 JSON 对象，不要 Markdown、解释或额外字段。必须符合给定 JSON Schema；'
-        '保留当前配置中未被用户修改的字段。不要虚构不存在的表面编号；无法确定时在 JSON 中保留原值。'
+        '只输出一个符合给定 JSON Schema 的 JSON 对象，不要 Markdown 或解释。不要调用工具、读取文件或运行仿真。'
+        '保留当前配置中未被用户修改的字段和 model_id。必须包含至少一个有效热源，不能用空热源列表代替用户要求。'
+        '新增或修改面选区时，使用 geometry.surface_selections 中的 id，写入热源或散热区的 surface_selection 字段；'
+        '例如顶部热源使用 surface_selection="top"，不需要提供 faces。只可使用 face_count 大于零的选区。'
+        '已有选区可保留原 faces，不要猜测或生成新的数字编号。热源位置与散热位置分别处理。'
+        '全部外表面对流通常用 default_h 和 heat_convection；不得因此把顶部热源扩大为全部外表面。'
+        '材料优先采用提供的材料预设。用户确认操作在网页执行，你只返回配置。'
     )
     user_input = {
         'model_id': model_id,
         'geometry': geometry,
         'current_config': current or {},
         'request': prompt.strip(),
+        'material_presets': PRESETS,
         'simulation_schema': schema,
     }
     return instructions + '\n输入数据：\n' + json.dumps(user_input, ensure_ascii=False)
 
 
-def _validated_codex_text(text, current):
+def _validated_codex_text(text, current, model_id=None):
     if not text:
         raise ValueError('Codex 未返回文本结果')
-    config = _json_from_text(text)
+    returned = _json_from_text(text)
+    if not isinstance(returned, dict):
+        raise ValueError('配置必须是 JSON 对象。')
+    config = {**copy.deepcopy(current or {}), **returned}
+    expected_model = model_id or (current or {}).get('model_id')
+    if expected_model and config.get('model_id', expected_model) != expected_model:
+        raise ValueError('Agent 返回了其他模型的配置，请为当前模型重新生成。')
+    if expected_model:
+        config['model_id'] = expected_model
+    if not config.get('heat_sources'):
+        raise ValueError('草案未生成热源。请明确功率与受热面，或指定点热源位置；当前草案不能运行。')
+    selections = None
+    for group in [*config.get('heat_sources', []), *config.get('cooling', [])]:
+        selector = group.pop('surface_selection', None)
+        if selector is None:
+            continue
+        if selections is None:
+            selections = _surface_selections(config['model_id'])
+        if selector not in selections or not selections[selector]['faces']:
+            raise ValueError(f'当前模型没有可用的“{selector}”受热/散热选区，请手动刷选后重新生成。')
+        selected = selections[selector]['faces']
+        if group.get('faces') and sorted(set(group['faces'])) != selected:
+            raise ValueError('Agent 的选区名称与面编号冲突，请重新生成或手动刷选。')
+        group['faces'] = selected
     validated = Simulation.model_validate(config)
+    if model_id:
+        metadata = read_json(MODELS / model_id / 'metadata.json')
+        for group in [*validated.heat_sources, *validated.cooling]:
+            if group.faces and max(group.faces) >= metadata['triangles']:
+                raise ValueError('Agent 返回了当前模型不存在的面编号，请重新选取。')
     return validated.model_dump(mode='json')
+
+
+def _codex_changes(config):
+    changes = [f'材料：{config["base_material"]["name"]}',
+               f'仿真时长：{config["duration_s"]:g} s；计算步长：{config["dt_s"]:g} s；保存间隔：{config["save_s"]:g} s']
+    for heat in config['heat_sources']:
+        target = (f'{len(heat["faces"])} 个三角面' if heat['source_type'] == 'surface' and heat['placement'] != 'embedded'
+                  else f'点位置 {heat.get("position_m")} m')
+        changes.append(f'热源“{heat["name"]}”：{heat["power_W"]:g} W，{heat["start_s"]:g}–{heat["end_s"]:g} s，{target}')
+    return changes
 
 
 def _find_codex_cli():
@@ -366,13 +461,60 @@ def _cli_response_text(stdout):
         except json.JSONDecodeError:
             continue
         item = event.get('item') if isinstance(event, dict) else None
-        if isinstance(item, dict) and item.get('type') == 'agent_message' and isinstance(item.get('text'), str):
+        if isinstance(event, dict) and event.get('type') == 'item.completed' and isinstance(item, dict) and item.get('type') == 'agent_message' and isinstance(item.get('text'), str):
             chunks.append(item['text'])
-    return '\n'.join(chunks).strip()
+    return chunks[-1].strip() if chunks else ''
+
+
+def _codex_cli_env():
+    """Give this child the user's proxy settings without changing the parent.
+
+    The Windows browser uses WinINET proxy settings, while the CLI needs proxy
+    environment variables. Explicit proxy environment settings take precedence.
+    Read the registry for each request so a running service sees proxy changes.
+    """
+    env = os.environ.copy()
+    explicit = {key.lower() for key in env if key.lower() in
+                ('http_proxy', 'https_proxy', 'all_proxy')}
+    registry_proxies = getattr(urllib.request, 'getproxies_registry', lambda: {})
+    if not explicit:
+        for scheme, address in registry_proxies().items():
+            if scheme in ('http', 'https') and address:
+                env[f'{scheme.upper()}_PROXY'] = address
+    exclusions = env.get('no_proxy', env.get('NO_PROXY', '')).split(',')
+    exclusions = [entry.strip() for entry in exclusions if entry.strip()]
+    for host in ('127.0.0.1', 'localhost', '::1'):
+        if host not in exclusions:
+            exclusions.append(host)
+    env['NO_PROXY'] = env['no_proxy'] = ','.join(exclusions)
+    return env
+
+
+def _codex_cli_timeout():
+    raw = os.environ.get('THERMAL_CODEX_TIMEOUT_S', '180')
+    try:
+        seconds = int(raw)
+    except ValueError as error:
+        raise ValueError('THERMAL_CODEX_TIMEOUT_S 必须是 15–600 之间的整数秒数。') from error
+    if not 15 <= seconds <= 600:
+        raise ValueError('THERMAL_CODEX_TIMEOUT_S 必须是 15–600 之间的整数秒数。')
+    return seconds
+
+
+def _cli_diagnostic_text(value):
+    # TimeoutExpired may contain bytes even when subprocess uses text=True.
+    if isinstance(value, bytes):
+        value = value.decode('utf-8', errors='replace')
+    text = value or ''
+    text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+    text = re.sub(r'(?i)Bearer\s+\S+', 'Bearer [redacted]', text)
+    return re.sub(r'\bsk-[A-Za-z0-9_-]+', '[redacted]', text)
 
 
 def _cli_error_detail(stdout, stderr):
     """Prefer structured CLI errors over startup warnings on stderr."""
+    stdout = _cli_diagnostic_text(stdout)
+    stderr = _cli_diagnostic_text(stderr)
     for line in reversed((stdout or '').splitlines()):
         try:
             event = json.loads(line)
@@ -384,6 +526,9 @@ def _cli_error_detail(stdout, stderr):
             error = event.get('error')
             if isinstance(error, dict) and isinstance(error.get('message'), str):
                 return error['message']
+    for line in reversed(stderr.splitlines()):
+        if any(term in line.lower() for term in ('request timed out', 'stream disconnected', 'connection refused', 'error:')):
+            return line.strip()[-500:]
     return (stderr or stdout or '').strip()[-800:]
 
 
@@ -400,26 +545,38 @@ def _codex_cli_plan_request(model_id, prompt, current, executable):
     if model:
         args[2:2] = ['--model', model]
     try:
+        timeout = _codex_cli_timeout()
+    except ValueError as error:
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=[str(error)], mode='codex', provider='cli', error_code='configuration')
+    try:
         completed = subprocess.run(
             args, input=cli_prompt, text=True, encoding='utf-8', capture_output=True,
-            cwd=str(ROOT), timeout=90,
+            cwd=str(ROOT), timeout=timeout, env=_codex_cli_env(),
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except subprocess.TimeoutExpired as error:
+        detail = _cli_error_detail(error.stdout, error.stderr)
+        network_timeout = any(term in detail.lower() for term in ('request timed out', 'stream disconnected'))
+        message = (f'Codex 上游连接超时，重试后仍未在 {timeout} 秒内完成。请检查网络或系统代理。'
+                   if network_timeout else f'Codex 配置生成超过 {timeout} 秒，尚未收到完整结果。请稍后重试。')
         return dict(ok=False, config=current or {}, changes=[], warnings=[],
-                    questions=[f'无法启动本机 Codex CLI：{error}'], mode='codex', provider='cli')
+                    questions=[message], mode='codex', provider='cli', error_code='timeout', diagnostic=detail)
+    except OSError as error:
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=[f'无法启动本机 Codex CLI：{error}'], mode='codex', provider='cli', error_code='startup')
     if completed.returncode != 0:
         detail = _cli_error_detail(completed.stdout, completed.stderr)
         return dict(ok=False, config=current or {}, changes=[], warnings=[],
                     questions=[f'本机 Codex CLI 请求失败（退出码 {completed.returncode}）：{detail}'],
-                    mode='codex', provider='cli')
+                    mode='codex', provider='cli', error_code='cli_failed')
     try:
-        config = _validated_codex_text(_cli_response_text(completed.stdout), current)
+        config = _validated_codex_text(_cli_response_text(completed.stdout), current, model_id)
     except Exception as error:
         return dict(ok=False, config=current or {}, changes=[], warnings=[],
                     questions=[f'Codex 返回的配置无法通过 Simulation 校验：{str(error).split(chr(10))[0]}'],
-                    mode='codex', provider='cli')
-    return dict(ok=True, config=config, changes=['已由本机 Codex 生成配置'],
+                    mode='codex', provider='cli', error_code='invalid_config')
+    return dict(ok=True, config=config, changes=_codex_changes(config),
                 warnings=[], questions=[], mode='codex', provider='cli', model=model or None)
 
 
@@ -439,7 +596,10 @@ def _codex_api_plan_request(model_id, prompt, current):
     instructions = (
         '你是 Thermal Studio 的仿真配置助手。根据用户描述生成完整、可执行的 Simulation JSON 配置。'
         '只输出一个 JSON 对象，不要 Markdown、解释或额外字段。必须符合给定 JSON Schema；'
-        '保留当前配置中未被用户修改的字段。不要虚构不存在的表面编号；无法确定时在 JSON 中保留原值。'
+        '保留当前配置中未被用户修改的字段与 model_id。必须生成至少一个有效热源。'
+        '新增或修改受热面时使用 geometry.surface_selections 中非空选区的 id，写入 surface_selection 字段，'
+        '例如顶部热源使用 surface_selection="top"，由本地后端生成 faces；不要猜测面编号。'
+        '热源与散热面分别处理，全部外表面对流使用 default_h 与 heat_convection。用户确认由网页处理，只返回配置。'
     )
     user_input = {
         'model_id': model_id,
@@ -485,11 +645,11 @@ def _codex_api_plan_request(model_id, prompt, current):
         text = _response_text(payload)
         if not text:
             raise ValueError('Responses API 未返回文本结果')
-        config = _validated_codex_text(text, current)
+        config = _validated_codex_text(text, current, model_id)
     except Exception as error:
         return dict(ok=False, config=current or {}, changes=[], warnings=[],
                     questions=[f'Codex 返回的配置无法通过 Simulation 校验：{str(error).split(chr(10))[0]}'], mode='codex', provider='api')
-    return dict(ok=True, config=config, changes=['已由 Codex 生成配置'],
+    return dict(ok=True, config=config, changes=_codex_changes(config),
                 warnings=[], questions=[], mode='codex', provider='api', model=model)
 
 

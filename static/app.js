@@ -112,8 +112,68 @@ $('agent-trace-close').onclick=()=>$('agent-trace').hidden=true;
 const agentModeLabels={local:'本地规则解析器',codex:'Codex'};
 function refreshAgentModeHint(){const mode=$('agent-mode')?.value||'local';$('agent-mode-hint').textContent=mode==='codex'?'Codex 模式调用本机官方 Codex CLI；如需 API 请设置 THERMAL_CODEX_PROVIDER=api。':'本地模式在当前电脑上解析参数，无需联网。';}
 $('agent-mode').onchange=refreshAgentModeHint;
- $('agent-plan').onclick=protect(async()=>{if(!cfg)throw new Error('请先导入模型');const prompt=$('agent-prompt').value.trim();if(!prompt)throw new Error('请先描述仿真目标');const mode=$('agent-mode')?.value||'local';agentTraceReset();agentTraceSet(0,'active',(agentModeLabels[mode]||mode)+' 正在解析自然语言目标');$('agent-plan').disabled=true;$('agent-plan').textContent='分析中…';try{const plan=await post('/agent/plan',{model_id:cfg.model_id,prompt,config:cfg,mode});agentConfig=plan.config;agentTraceSet(0,'done','已识别工况描述 · '+(agentModeLabels[mode]||mode));agentTraceSet(1,'done','模型 '+model.name+' · 热源位置已解析');agentTraceSet(2,'done',(plan.changes||[]).join(' · ')||'保持当前参数');agentTraceSet(3,plan.ok?'done':'error',plan.questions?.join(' ')||'配置校验通过，请用户确认');$('agent-plan-box').hidden=false;$('agent-plan-mode').textContent=' · '+(agentModeLabels[mode]||mode);const lines=[...(plan.changes||[]).map(x=>'✓ '+x),...(plan.warnings||[]).map(x=>'! '+x)];$('agent-plan-text').textContent=lines.length?lines.join('\n'):'未识别到可修改参数';const questions=plan.questions||[];$('agent-plan-questions').textContent=questions.length?questions.join('\n'):'配置完整，请确认后运行。';$('agent-plan-questions').classList.toggle('has-warning',!!questions.length);$('agent-apply').disabled=!plan.ok;$('agent-confirm').disabled=!plan.ok;}finally{$('agent-plan').disabled=false;$('agent-plan').textContent='生成配置';}});
- function applyAgentConfig(){if(!agentConfig)throw new Error('请先生成配置');cfg=clone(agentConfig);dirty=true;result=null;temperatures=null;jobId=null;activeRegion=-1;activeHeat=0;activeCooling=0;syncFields();setView('setup');}
+ $('agent-plan').onclick=protect(async()=>{
+  if(!cfg)throw new Error('请先导入模型');
+  const prompt=$('agent-prompt').value.trim();
+  if(!prompt)throw new Error('请先描述仿真目标');
+  const mode=$('agent-mode')?.value||'local',requestConfig=clone(cfg);
+  const started=Date.now();
+  agentConfig=null;
+  $('agent-apply').disabled=true;
+  $('agent-confirm').disabled=true;
+  $('agent-plan-box').hidden=true;
+  agentTraceReset();
+  const showWaiting=()=>agentTraceSet(0,'active',(agentModeLabels[mode]||mode)+' 正在生成配置 · 已等待 '+Math.floor((Date.now()-started)/1000)+' 秒');
+  showWaiting();
+  const waitingTimer=setInterval(showWaiting,1000);
+  $('agent-plan').disabled=true;
+  $('agent-plan').textContent='分析中…';
+  try{
+    const plan=await post('/agent/plan',{model_id:requestConfig.model_id,prompt,config:requestConfig,mode});
+    clearInterval(waitingTimer);
+    if(cfg.model_id!==requestConfig.model_id)throw new Error('生成期间已切换模型，请为当前模型重新生成配置。');
+    const questions=plan.questions||[];
+    $('agent-plan-box').hidden=false;
+    $('agent-plan-mode').textContent=' · '+(agentModeLabels[mode]||mode);
+    if(!plan.ok){
+      const detail=questions.join('\n')||'配置生成失败，请重试。';
+      agentTraceSet(0,'error',detail);
+      $('agent-plan-text').textContent='配置生成未完成，当前参数保持不变。';
+      $('agent-plan-questions').textContent=detail;
+      $('agent-plan-questions').classList.add('has-warning');
+      return;
+    }
+    if(!plan.config?.heat_sources?.length)throw new Error('Agent 草案没有生成热源。请重新生成或手动添加热源；本次不能确认运行。');
+    if(plan.config.model_id!==requestConfig.model_id)throw new Error('Agent 草案属于其他模型，请为当前模型重新生成。');
+    agentConfig=plan.config;
+    agentTraceSet(0,'done','已收到配置 · '+(agentModeLabels[mode]||mode));
+    agentTraceSet(1,'done','模型 '+model.name+' · 请核对热源选区');
+    agentTraceSet(2,'done',(plan.changes||[]).join(' · ')||'保持当前参数');
+    agentTraceSet(3,'done',questions.join(' ')||'配置结构校验通过，请核对参数后确认');
+    const lines=[...(plan.changes||[]).map(x=>'✓ '+x),...(plan.warnings||[]).map(x=>'! '+x)];
+    $('agent-plan-text').textContent=lines.length?lines.join('\n'):'当前配置无需修改。';
+    $('agent-plan-questions').textContent=questions.length?questions.join('\n'):'请核对配置；确认后运行。';
+    $('agent-plan-questions').classList.toggle('has-warning',!!questions.length);
+    $('agent-apply').disabled=false;
+    $('agent-confirm').disabled=false;
+  }catch(error){
+    agentConfig=null;
+    $('agent-apply').disabled=true;
+    $('agent-confirm').disabled=true;
+    agentTraceSet(0,'error',error.message);
+    $('agent-plan-box').hidden=false;
+    $('agent-plan-mode').textContent=' · '+(agentModeLabels[mode]||mode);
+    $('agent-plan-text').textContent='配置生成未完成，当前参数保持不变。';
+    $('agent-plan-questions').textContent=error.message;
+    $('agent-plan-questions').classList.add('has-warning');
+    throw error;
+  }finally{
+    clearInterval(waitingTimer);
+    $('agent-plan').disabled=false;
+    $('agent-plan').textContent='生成配置';
+  }
+ });
+ function applyAgentConfig(){if(!agentConfig)throw new Error('请先生成配置');if(!agentConfig.heat_sources?.length)throw new Error('草案缺少热源，请重新生成配置。');if(agentConfig.model_id!==cfg.model_id)throw new Error('模型已改变，请重新生成配置。');cfg=clone(agentConfig);dirty=true;result=null;temperatures=null;jobId=null;activeRegion=-1;activeHeat=0;activeCooling=0;syncFields();setView('setup');}
  $('agent-apply').onclick=protect(async()=>{applyAgentConfig();agentRunning=false;agentTraceSet(3,'done','配置已应用，可在主界面修改后确认');$('agent-dialog').hidden=true;toast('Agent 配置已应用，请检查或修改参数后点击“运行仿真”');});
  $('agent-confirm').onclick=protect(async()=>{applyAgentConfig();agentRunning=true;agentTraceSet(4,'active','用户已确认，正在提交任务');$('agent-dialog').hidden=true;toast('已确认 Agent 配置，开始运行仿真');$('run').click();});
 $('export-config').onclick=()=>{if(!cfg)return;const url=URL.createObjectURL(new Blob([JSON.stringify(cfg,null,2)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download='thermal-config.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
