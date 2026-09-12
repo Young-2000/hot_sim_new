@@ -1,0 +1,198 @@
+from runtime import *
+import math, hashlib
+import numpy as np
+import gmsh, trimesh
+
+SCALES={'mm':.001,'cm':.01,'m':1.}
+
+def init_gmsh():
+    gmsh.initialize()
+    gmsh.option.setNumber('General.Terminal',1)
+    gmsh.option.setNumber('General.Verbosity',2)
+    gmsh.option.setNumber('General.NumThreads',4)
+    gmsh.option.setNumber('Mesh.MaxNumThreads3D',4)
+    gmsh.option.setString('Geometry.OCCTargetUnit','M')
+    gmsh.model.add('thermal_part')
+
+def import_step(folder, meta, fragment_bodies=False):
+    gmsh.model.occ.importShapes(str(folder/meta['source']))
+    gmsh.model.occ.synchronize()
+    volumes=gmsh.model.getEntities(3)
+    if not volumes: raise ValueError('STEP 没有封闭实体，无法生成体积网格。请导出实体 STEP。')
+    scale=meta.get('step_scale',1)
+    if scale!=1: gmsh.model.occ.dilate(volumes,0,0,0,scale,scale,scale)
+    # Fragmenting every imported body can destroy small or self-intersecting
+    # CAD edges. Preserve the source topology by default; region boxes are
+    # fragmented explicitly later when a material partition is requested.
+    if fragment_bodies and len(volumes)>1: gmsh.model.occ.fragment(volumes[:1],volumes[1:])
+    gmsh.model.occ.synchronize()
+    return gmsh.model.getEntities(3)
+
+def shell_tags(volumes):
+    outer=set()
+    for _,v in volumes:
+        _,loops=gmsh.model.occ.getSurfaceLoops(v)
+        if not len(loops): continue
+        sizes=[sum(gmsh.model.occ.getMass(2,int(s)) for s in loop) for loop in loops]
+        outer.update(int(s) for s in loops[int(np.argmax(sizes))])
+    return outer
+
+def extract_surface(outer):
+    tags,xyz,_=gmsh.model.mesh.getNodes()
+    lookup=np.full(int(max(tags))+1,-1,dtype=np.int64);lookup[tags]=np.arange(len(tags))
+    faces=[];flags=[]
+    orientations={abs(s):1 if s>0 else -1 for _,s in gmsh.model.getBoundary(gmsh.model.getEntities(3),combined=True,oriented=True)}
+    for _,surface in gmsh.model.getEntities(2):
+        types,_,nodes=gmsh.model.mesh.getElements(2,surface)
+        for kind,ns in zip(types,nodes):
+            if kind==2:
+                f=lookup[ns].reshape(-1,3)
+                if orientations.get(surface,1)<0:f=f[:,[0,2,1]]
+                faces.append(f);flags.extend([surface in outer]*len(f))
+    return np.asarray(xyz).reshape(-1,3),np.vstack(faces),np.asarray(flags)
+
+def write_display(folder, points, faces, outer):
+    used=np.unique(faces);remap=np.full(len(points),-1,dtype=np.int64);remap[used]=np.arange(len(used))
+    points=points[used];faces=remap[faces]
+    np.savez_compressed(folder/'display.npz',points=points,faces=faces,is_outer=outer)
+    write_json(folder/'display.json',{'points':points.astype(np.float32).ravel().tolist(),'faces':faces.ravel().tolist(),'is_outer':outer.astype(int).tolist()})
+    return points,faces
+
+def load_stl(folder, meta):
+    mesh=trimesh.load(folder/meta['source'],force='mesh',process=True)
+    mesh.update_faces(mesh.nondegenerate_faces());mesh.remove_unreferenced_vertices();mesh.merge_vertices()
+    mesh.vertices*=SCALES[meta['units']]*meta.get('scale_factor',1.)
+    if not len(mesh.faces): raise ValueError('STL 中没有有效三角形')
+    components=trimesh.graph.connected_components(mesh.face_adjacency,nodes=np.arange(len(mesh.faces)),min_len=1)
+    shells=[mesh.submesh([ids],append=True,repair=False) for ids in components]
+    watertight=all(s.is_watertight for s in shells)
+    depth=np.zeros(len(shells),dtype=int);parents=np.full(len(shells),-1,dtype=int)
+    if watertight:
+        for i,s in enumerate(shells):
+            containers=[j for j,t in enumerate(shells) if i!=j and t.contains(s.vertices[:1])[0]]
+            depth[i]=len(containers)
+            if containers: parents[i]=min(containers,key=lambda j:abs(shells[j].volume))
+    outer=np.zeros(len(mesh.faces),dtype=bool);shell_id=np.zeros(len(mesh.faces),dtype=int)
+    for i,ids in enumerate(components): outer[ids]=depth[i]%2==0;shell_id[ids]=i
+    mesh.export(folder/'clean.stl')
+    np.savez_compressed(folder/'shells.npz',shell_id=shell_id,depth=depth,parents=parents)
+    return mesh.vertices,np.asarray(mesh.faces),outer,watertight
+
+def prepare_model(folder):
+    meta=read_json(folder/'metadata.json');progress(folder,'running',10,'正在读取几何')
+    if meta['kind']=='stl':
+        points,faces,outer,valid=load_stl(folder,meta)
+        meta['mesh_ready']=valid
+        meta['warning']='' if valid else 'STL 存在开口或非流形结构，可预览；运行前请修复或使用对应 STEP。'
+    else:
+        init_gmsh()
+        try:
+            volumes=import_step(folder,meta);outer_tags=shell_tags(volumes)
+            bbox=np.asarray(gmsh.model.getBoundingBox(-1,-1));size=float(max(bbox[3:]-bbox[:3]))/30
+            gmsh.option.setNumber('Mesh.MeshSizeMax',size)
+            gmsh.option.setNumber('Mesh.MeshSizeMin',size*.15)
+            gmsh.option.setNumber('Mesh.MeshSizeFromCurvature',20)
+            progress(folder,'running',40,'正在生成可选取的三角形表面')
+            gmsh.model.mesh.generate(2)
+            points,faces,outer=extract_surface(outer_tags)
+            meta['mesh_ready']=True;meta['warning']=''
+        except Exception as error:
+            meta.update(state='failed',mesh_ready=False,warning=f'STEP 表面网格失败：{error}')
+            write_json(folder/'metadata.json',meta)
+            raise
+        finally:gmsh.finalize()
+    points,faces=write_display(folder,points,faces,outer)
+    bounds=np.array([points.min(0),points.max(0)])
+    meta.update(bounds_m=bounds.tolist(),dimensions_m=(bounds[1]-bounds[0]).tolist(),vertices=len(points),triangles=len(faces),cavity_triangles=int((~outer).sum()),state='ready')
+    write_json(folder/'metadata.json',meta);progress(folder,'completed',100,'几何已就绪')
+
+def classify_stl_volume(folder):
+    display=np.load(folder/'display.npz');shells=np.load(folder/'shells.npz')
+    original=trimesh.Trimesh(vertices=display['points'],faces=display['faces'],process=False)
+    gmsh.merge(str(folder/'clean.stl'))
+    # Keep the STL as discrete topology. Parametrizing a complex, but closed,
+    # triangle shell can fail on high-genus or multi-component meshes.
+    gmsh.model.mesh.createTopology(exportDiscrete=True)
+    shell_surfaces={i:[] for i in range(len(shells['depth']))}
+    for _,surface in gmsh.model.getEntities(2):
+        types,_,elems=gmsh.model.mesh.getElements(2,surface)
+        element_nodes=next(ns for ty,ns in zip(types,elems) if ty==2)
+        nodes=element_nodes[:3]
+        center=np.mean([gmsh.model.mesh.getNode(int(n))[0] for n in nodes],axis=0)
+        _,_,idx=trimesh.proximity.closest_point(original,center[None,:])
+        shell_surfaces[int(shells['shell_id'][idx[0]])].append(surface)
+    loops={i:gmsh.model.geo.addSurfaceLoop(ss) for i,ss in shell_surfaces.items() if ss}
+    for i,depth in enumerate(shells['depth']):
+        if depth%2==0:
+            children=[loops[j] for j,parent in enumerate(shells['parents']) if parent==i and shells['depth'][j]==depth+1]
+            gmsh.model.geo.addVolume([loops[i]]+children)
+    gmsh.model.geo.synchronize()
+    return {s for i,ss in shell_surfaces.items() if shells['depth'][i]%2==0 for s in ss}
+
+def build_mesh(folder, cfg, job):
+    meta=read_json(folder/'metadata.json')
+    if not meta.get('mesh_ready'):raise ValueError(meta.get('warning','几何不封闭'))
+    size=cfg['mesh_size_m'];span=max(meta['dimensions_m'])
+    if size < span/130:raise ValueError('网格过细：首版单次目标尺寸不得小于最长边的 1/130。')
+    # The approved portrait ships with a checked mesh for a quick first run.
+    cached=folder/'checked_mesh.npz'
+    if cached.exists() and not cfg['regions'] and abs(size-.035)<1e-10:
+        return dict(np.load(cached))
+    init_gmsh()
+    try:
+        if meta['kind']=='step':
+            volumes=import_step(folder,meta)
+            if cfg['regions']:
+                tools=[]
+                for r in cfg['regions']:
+                    low=np.asarray(r['min_m']);extent=np.asarray(r['max_m'])-low
+                    tools.append((3,gmsh.model.occ.addBox(*low,*extent)))
+                fragments,maps=gmsh.model.occ.fragment(volumes,tools)
+                keep={tuple(e) for group in maps[:len(volumes)] for e in group if e[0]==3}
+                discard=[v for v in fragments if v[0]==3 and tuple(v) not in keep]
+                if discard:gmsh.model.occ.remove(discard,recursive=True)
+                gmsh.model.occ.synchronize();volumes=gmsh.model.getEntities(3)
+            outer=shell_tags(volumes)
+        else:outer=classify_stl_volume(folder)
+        gmsh.option.setNumber('Mesh.MeshSizeMin',size*.12)
+        gmsh.option.setNumber('Mesh.MeshSizeMax',size)
+        gmsh.option.setNumber('Mesh.MeshSizeFromCurvature',16)
+        gmsh.option.setNumber('Mesh.Algorithm',6)
+        gmsh.option.setNumber('Mesh.Algorithm3D',1)
+        progress(job,'running',20,'正在生成四面体网格')
+        gmsh.model.mesh.generate(3)
+        # Separate STEP solids may share exact coordinates without sharing CAD
+        # topology. Merge those nodes so heat can cross a touching interface.
+        try: gmsh.model.mesh.removeDuplicateNodes()
+        except Exception: pass
+        gmsh.model.mesh.optimize('Netgen')
+        tags,xyz,_=gmsh.model.mesh.getNodes();points=np.asarray(xyz).reshape(-1,3)
+        lookup=np.full(int(max(tags))+1,-1,dtype=np.int64);lookup[tags]=np.arange(len(tags))
+        types,ids,nodes=gmsh.model.mesh.getElements(3)
+        tets=np.vstack([lookup[ns].reshape(-1,4) for ty,ns in zip(types,nodes) if ty==4])
+        if len(points)>180000 or len(tets)>1000000:raise ValueError('网格超过本地首版规模上限，请增大网格尺寸。')
+        # Select only true exterior/void boundary entities of the combined solid.
+        surfaces=gmsh.model.getBoundary(gmsh.model.getEntities(3),combined=True,oriented=False)
+        faces=[];flags=[]
+        for _,s in surfaces:
+            ty,_,ns=gmsh.model.mesh.getElements(2,s)
+            for kind,n in zip(ty,ns):
+                if kind==2:
+                    f=lookup[n].reshape(-1,3);faces.append(f);flags.extend([s in outer]*len(f))
+        faces=np.vstack(faces)
+        used=np.unique(tets);remap=np.full(len(points),-1,dtype=np.int64);remap[used]=np.arange(len(used))
+        points=points[used];tets=remap[tets];faces=remap[faces]
+        if (faces<0).any():raise ValueError('表面和体积网格不匹配，请调整网格尺寸。')
+        vol=np.abs(np.linalg.det(points[tets[:,1:]]-points[tets[:,0]][:,None,:]))/6
+        if not np.all(vol>0):raise ValueError('网格存在零体积单元')
+        quality=np.concatenate([gmsh.model.mesh.getElementQualities(ii,'minSICN') for ty,ii in zip(types,ids) if ty==4])
+        result=dict(points=points,tets=tets,boundary_triangles=faces,is_outer=np.asarray(flags),tet_volumes=vol,minimum_quality=np.array(quality.min()))
+        np.savez_compressed(job/'mesh.npz',**result)
+        return result
+    finally:gmsh.finalize()
+
+def project(mesh, points, batch=4000):
+    nearest=[];dist=[];ids=[]
+    for start in range(0,len(points),batch):
+        c,d,i=trimesh.proximity.closest_point(mesh,points[start:start+batch]);nearest.append(c);dist.append(d);ids.append(i)
+    return np.vstack(nearest),np.concatenate(dist),np.concatenate(ids)

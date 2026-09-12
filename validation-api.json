@@ -1,0 +1,40 @@
+[
+  {
+    "format": "stl",
+    "model_id": "a6c4f9630a1146dabd5e3f4beda08ca3",
+    "job_id": "9c5c774f2e9446188212a63b4a0a2770",
+    "final": {
+      "time_s": 20.0,
+      "minimum_C": 26.345463232883116,
+      "maximum_C": 26.363839591785155,
+      "average_C": 26.35369256944832,
+      "stored_energy_J": 31.734164077761417,
+      "convective_loss_W": 0.026913994575601896
+    },
+    "material_volume_fractions": [
+      0.502139173750252,
+      0.49786082624974787
+    ],
+    "nodes": 412,
+    "tetrahedra": 1457
+  },
+  {
+    "format": "step",
+    "model_id": "58f780c35ab4435995cd86744e51f8cd",
+    "job_id": "f16e6bfed8704d6a9dbaf63bad08b55f",
+    "final": {
+      "time_s": 20.0,
+      "minimum_C": 26.346322198319218,
+      "maximum_C": 26.3656775850921,
+      "average_C": 26.354739117510153,
+      "stored_energy_J": 31.734257883631248,
+      "convective_loss_W": 0.02692873539654656
+    },
+    "material_volume_fractions": [
+      0.5,
+      0.4999999999999999
+    ],
+    "nodes": 444,
+    "tetrahedra": 1639
+  }
+]

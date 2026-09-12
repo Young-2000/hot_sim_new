@@ -1,0 +1,166 @@
+{
+  "job_id": "7ffeba4d51fc4e39b454c781d1f32f35",
+  "summary": {
+    "heat_sources": [
+      {
+        "name": "已选热源",
+        "power_W": 100.0,
+        "selected_area_m2": 0.3201988709171085,
+        "mapped_area_m2": 0.3206570190276961
+      }
+    ],
+    "boundary_projection_max_m": 0.0033479688950040056,
+    "display_projection_max_m": 0.002726238195124755,
+    "volume_m3": 0.18776379649206718,
+    "mass_kg": 1050.2239261224352,
+    "heat_capacity_J_K": 567035.1663484422,
+    "constant_field_conduction_residual": 6.226963389366347e-14,
+    "materials": [
+      {
+        "name": "铜 C11000",
+        "k": 391.0,
+        "rho": 8910.0,
+        "cp": 385.0,
+        "volume_m3": 0.01598555057241452,
+        "cells": 14088
+      },
+      {
+        "name": "铝",
+        "k": 205.0,
+        "rho": 2700.0,
+        "cp": 900.0,
+        "volume_m3": 0.08589983072832569,
+        "cells": 40058
+      },
+      {
+        "name": "铁",
+        "k": 80.0,
+        "rho": 7870.0,
+        "cp": 449.0,
+        "volume_m3": 0.08587841519132695,
+        "cells": 42019
+      }
+    ],
+    "energy": {
+      "input_energy_J": 12000.0,
+      "convective_energy_J": 41.093662346002404,
+      "energy_balance_error_J": 2.1827872842550278e-11,
+      "maximum_step_residual_J": 4.547473508864641e-12
+    },
+    "nodes": 23802,
+    "tetrahedra": 96165,
+    "minimum_quality": 0.0036403037309550197,
+    "stats": [
+      {
+        "time_s": 0.0,
+        "minimum_C": 25.0,
+        "maximum_C": 25.0,
+        "average_C": 25.0,
+        "stored_energy_J": 0.0,
+        "convective_loss_W": 0.0
+      },
+      {
+        "time_s": 10.0,
+        "minimum_C": 24.997944552433832,
+        "maximum_C": 25.061795526819168,
+        "average_C": 25.00181694094641,
+        "stored_energy_J": 999.4110370725977,
+        "convective_loss_W": 0.058896292740192806
+      },
+      {
+        "time_s": 20.0,
+        "minimum_C": 24.999731685146315,
+        "maximum_C": 25.089780407442095,
+        "average_C": 25.003628975487562,
+        "stored_energy_J": 1998.2611400138437,
+        "convective_loss_W": 0.11498970587533082
+      },
+      {
+        "time_s": 30.0,
+        "minimum_C": 24.999842400720105,
+        "maximum_C": 25.11076336472089,
+        "average_C": 25.00543734860964,
+        "stored_energy_J": 2996.5650097512034,
+        "convective_loss_W": 0.16961302626396887
+      },
+      {
+        "time_s": 40.0,
+        "minimum_C": 24.999897466019746,
+        "maximum_C": 25.128581503401097,
+        "average_C": 25.007242727724694,
+        "stored_energy_J": 3994.3376870754123,
+        "convective_loss_W": 0.22273226757908723
+      },
+      {
+        "time_s": 50.0,
+        "minimum_C": 24.999994415824215,
+        "maximum_C": 25.1438344073678,
+        "average_C": 25.00904550615623,
+        "stored_energy_J": 4991.593831700475,
+        "convective_loss_W": 0.2743855374937097
+      },
+      {
+        "time_s": 60.0,
+        "minimum_C": 24.99999575844717,
+        "maximum_C": 25.157798742738816,
+        "average_C": 25.010845935107092,
+        "stored_energy_J": 5988.347017934583,
+        "convective_loss_W": 0.32468137658878454
+      },
+      {
+        "time_s": 70.0,
+        "minimum_C": 24.999995945952026,
+        "maximum_C": 25.170513912456684,
+        "average_C": 25.012644185283726,
+        "stored_energy_J": 6984.609505149206,
+        "convective_loss_W": 0.37375127853767603
+      },
+      {
+        "time_s": 80.0,
+        "minimum_C": 24.999997868995482,
+        "maximum_C": 25.182241232508662,
+        "average_C": 25.014440379395246,
+        "stored_energy_J": 7980.39225188164,
+        "convective_loss_W": 0.42172532675637286
+      },
+      {
+        "time_s": 90.0,
+        "minimum_C": 24.999997337863803,
+        "maximum_C": 25.193164912920192,
+        "average_C": 25.016234610425112,
+        "stored_energy_J": 8975.705028178374,
+        "convective_loss_W": 0.4687223703264191
+      },
+      {
+        "time_s": 100.0,
+        "minimum_C": 24.999997624226783,
+        "maximum_C": 25.203420827430197,
+        "average_C": 25.018026952479943,
+        "stored_energy_J": 9970.556556391653,
+        "convective_loss_W": 0.514847178671638
+      },
+      {
+        "time_s": 110.0,
+        "minimum_C": 24.999999438848565,
+        "maximum_C": 25.213112498038633,
+        "average_C": 25.019817467631626,
+        "stored_energy_J": 10964.954649856894,
+        "convective_loss_W": 0.5601906534757001
+      },
+      {
+        "time_s": 120.0,
+        "minimum_C": 24.999999340103685,
+        "maximum_C": 25.222320751832385,
+        "average_C": 25.021606209917202,
+        "stored_energy_J": 11958.906337653976,
+        "convective_loss_W": 0.604831220291361
+      }
+    ],
+    "material_interface": "CAD-conforming box fragments",
+    "assumptions": [
+      "constant material properties",
+      "perfect material contact",
+      "prescribed convection coefficient; no airflow or radiation solve"
+    ]
+  }
+}
