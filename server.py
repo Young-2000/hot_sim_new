@@ -8,7 +8,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from schemas import Simulation, PRESETS, CalibrationRequest, RefrigerationCycle, CpuSimulation, AgentRequest
 from analysis import run_calibration, run_cycle, run_cpu
-from agent import plan_request
+from agent import codex_plan_request, plan_request
 from solver import gpu_status
 
 app=FastAPI(title='Thermal Studio Local',version='0.1.0')
@@ -81,7 +81,11 @@ def cpu_simulation(request:CpuSimulation):
 @app.post('/api/agent/plan')
 def agent_plan(request:AgentRequest):
     located(MODELS, request.model_id)
-    return plan_request(request.model_id, request.prompt, request.config)
+    if request.mode == 'codex':
+        return codex_plan_request(request.model_id, request.prompt, request.config)
+    result = plan_request(request.model_id, request.prompt, request.config)
+    result['mode'] = 'local'
+    return result
 
 @app.get('/api/bootstrap')
 def bootstrap():

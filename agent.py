@@ -1,6 +1,9 @@
 import copy
 import json
+import os
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -263,3 +266,110 @@ def plan_request(model_id, prompt, current):
     if not prompt or len(prompt.strip()) < 2:
         return dict(ok=False, config=current, changes=[], warnings=[], questions=['请描述材料、热源功率、时长和受热面。'])
     return make_plan(model_id, prompt.strip(), current)
+
+
+def _response_text(payload):
+    """Extract text from the Responses API's output content blocks."""
+    direct = payload.get('output_text')
+    if isinstance(direct, str) and direct.strip():
+        return direct
+    chunks = []
+    for item in payload.get('output') or []:
+        for content in item.get('content') or []:
+            if content.get('type') in ('output_text', 'text') and isinstance(content.get('text'), str):
+                chunks.append(content['text'])
+    return '\n'.join(chunks).strip()
+
+
+def _json_from_text(text):
+    """Parse JSON while tolerating a fenced block from a model."""
+    value = text.strip()
+    if value.startswith('```'):
+        value = re.sub(r'^```(?:json)?\s*', '', value, flags=re.I)
+        value = re.sub(r'\s*```$', '', value)
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        start, end = value.find('{'), value.rfind('}')
+        if start >= 0 and end > start:
+            return json.loads(value[start:end + 1])
+        raise
+
+
+def codex_plan_request(model_id, prompt, current):
+    """Generate a Simulation config with the OpenAI Responses API.
+
+    This path is deliberately explicit: missing credentials or API failures
+    are reported to the caller and never fall back to the local parser.
+    """
+    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
+    if not api_key:
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=['Codex 模式需要设置 OPENAI_API_KEY；当前未配置，未调用本地解析器。'],
+                    mode='codex')
+    model = os.environ.get('OPENAI_MODEL', 'gpt-5.2').strip() or 'gpt-5.2'
+    metadata = read_json(MODELS / model_id / 'metadata.json')
+    geometry = {
+        'name': metadata.get('name'),
+        'kind': metadata.get('kind'),
+        'dimensions_m': metadata.get('dimensions_m'),
+        'triangles': metadata.get('triangles'),
+        'components': metadata.get('components', []),
+    }
+    schema = Simulation.model_json_schema()
+    instructions = (
+        '你是 Thermal Studio 的仿真配置助手。根据用户描述生成完整、可执行的 Simulation JSON 配置。'
+        '只输出一个 JSON 对象，不要 Markdown、解释或额外字段。必须符合给定 JSON Schema；'
+        '保留当前配置中未被用户修改的字段。不要虚构不存在的表面编号；无法确定时在 JSON 中保留原值。'
+    )
+    user_input = {
+        'model_id': model_id,
+        'geometry': geometry,
+        'current_config': current or {},
+        'request': prompt.strip(),
+        'simulation_schema': schema,
+    }
+    body = json.dumps({
+        'model': model,
+        'input': [
+            {'role': 'system', 'content': instructions},
+            {'role': 'user', 'content': json.dumps(user_input, ensure_ascii=False)},
+        ],
+        'text': {
+            'format': {
+                'type': 'json_schema',
+                'name': 'simulation_config',
+                # Pydantic defaults are optional in its generated schema;
+                # non-strict structured output keeps those defaults valid,
+                # while Simulation.model_validate below remains authoritative.
+                'strict': False,
+                'schema': schema,
+            }
+        },
+    }, ensure_ascii=False).encode('utf-8')
+    request = urllib.request.Request(
+        'https://api.openai.com/v1/responses', data=body,
+        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode('utf-8', errors='replace')[:500]
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=[f'Codex 请求失败（HTTP {error.code}）：{detail}'], mode='codex')
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=[f'无法连接 Codex API：{error}'], mode='codex')
+    try:
+        text = _response_text(payload)
+        if not text:
+            raise ValueError('Responses API 未返回文本结果')
+        config = _json_from_text(text)
+        validated = Simulation.model_validate(config)
+    except Exception as error:
+        return dict(ok=False, config=current or {}, changes=[], warnings=[],
+                    questions=[f'Codex 返回的配置无法通过 Simulation 校验：{str(error).split(chr(10))[0]}'], mode='codex')
+    return dict(ok=True, config=validated.model_dump(mode='json'), changes=['已由 Codex 生成配置'],
+                warnings=[], questions=[], mode='codex', model=model)

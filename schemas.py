@@ -130,6 +130,9 @@ class AgentRequest(Strict):
     model_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,60}$')
     prompt: str = Field(min_length=2, max_length=4000)
     config: dict = Field(default_factory=dict)
+    # Select the deterministic local parser or the optional OpenAI Responses
+    # API integration.  Local remains the default for existing clients.
+    mode: Literal['local', 'codex'] = 'local'
 
 class CalibrationPoint(Strict):
     time_s: Finite = Field(ge=0, le=864000)
