@@ -371,6 +371,22 @@ def _cli_response_text(stdout):
     return '\n'.join(chunks).strip()
 
 
+def _cli_error_detail(stdout, stderr):
+    """Prefer structured CLI errors over startup warnings on stderr."""
+    for line in reversed((stdout or '').splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            if event.get('type') == 'error' and isinstance(event.get('message'), str):
+                return event['message']
+            error = event.get('error')
+            if isinstance(error, dict) and isinstance(error.get('message'), str):
+                return error['message']
+    return (stderr or stdout or '').strip()[-800:]
+
+
 def _codex_cli_plan_request(model_id, prompt, current, executable):
     try:
         cli_prompt = _codex_prompt(model_id, prompt, current)
@@ -386,14 +402,14 @@ def _codex_cli_plan_request(model_id, prompt, current, executable):
     try:
         completed = subprocess.run(
             args, input=cli_prompt, text=True, encoding='utf-8', capture_output=True,
-            cwd=str(ROOT), timeout=120,
+            cwd=str(ROOT), timeout=90,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return dict(ok=False, config=current or {}, changes=[], warnings=[],
                     questions=[f'无法启动本机 Codex CLI：{error}'], mode='codex', provider='cli')
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or '').strip()[-800:]
+        detail = _cli_error_detail(completed.stdout, completed.stderr)
         return dict(ok=False, config=current or {}, changes=[], warnings=[],
                     questions=[f'本机 Codex CLI 请求失败（退出码 {completed.returncode}）：{detail}'],
                     mode='codex', provider='cli')
