@@ -181,7 +181,7 @@ def slice_file(id:str,key:str,name:str):
 @app.get('/api/jobs/{id}/files/{name}')
 def download(id:str,name:str):
     folder=located(JOBS,id)
-    if name not in ('surface.bin','config.json','history.csv','audit.json','report.md','result.zip'):raise HTTPException(404)
+    if name not in ('surface.bin','displacement.bin','config.json','history.csv','audit.json','report.md','result.zip'):raise HTTPException(404)
     if not (folder/name).exists():raise HTTPException(404,'文件尚未生成')
     return FileResponse(folder/name,filename=None if name=='surface.bin' else name)
 
