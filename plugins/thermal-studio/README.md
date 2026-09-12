@@ -21,7 +21,7 @@
 
 ## Codex Agent 模式
 
-页面中的 Agent 可以选择本地规则解析器或 Codex。Codex 模式默认调用本机官方 `codex exec`，使用当前 Codex 登录态；找不到 CLI 时才读取 `OPENAI_API_KEY` 调用 Responses API。可用 `THERMAL_CODEX_PROVIDER=api` 强制 API，`THERMAL_CODEX_MODEL` 指定 CLI 模型。插件不会保存或打印密钥。提交自然语言配置后，先检查配置草案，再点击“确认并仿真”。
+页面中的 Agent 可以选择本地规则解析器或 Codex。Codex 模式默认调用本机官方 `codex exec`，使用当前 Codex 登录态；设置 `THERMAL_CODEX_PROVIDER=api` 或 `auto` 时才使用 Responses API。可用 `THERMAL_CODEX_MODEL` 指定 CLI 模型。插件不会保存或打印密钥。提交自然语言配置后，先检查配置草案，再点击“确认并仿真”。
 
 ## 独立安装
 
