@@ -182,13 +182,13 @@ def slice_file(id:str,key:str,name:str):
 def download(id:str,name:str):
     folder=located(JOBS,id)
     if name not in ('surface.bin','displacement.bin','config.json','history.csv','audit.json','report.md','report.pdf','result.zip'):raise HTTPException(404)
-    if not (folder/name).exists():
-        # Older completed jobs predate PDF generation; create it lazily.
-        if name=='report.pdf' and (folder/'report.md').exists():
-            from solver import write_report_pdf
-            write_report_pdf(folder/'report.pdf',(folder/'report.md').read_text(encoding='utf-8'))
-        else:
-            raise HTTPException(404,'文件尚未生成')
+    if name=='report.pdf' and (folder/'report.md').exists():
+        # Regenerate on download so reports created by older renderers are
+        # upgraded automatically and always reflect the current Markdown.
+        from solver import write_report_pdf
+        write_report_pdf(folder/'report.pdf',(folder/'report.md').read_text(encoding='utf-8'))
+    elif not (folder/name).exists():
+        raise HTTPException(404,'文件尚未生成')
     media_type='application/pdf' if name=='report.pdf' else None
     return FileResponse(folder/name,filename=None if name=='surface.bin' else name,media_type=media_type)
 
